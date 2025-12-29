@@ -834,9 +834,9 @@ def main():
     parser.add_argument('--n_layers', type=int, default=3)
     parser.add_argument('--mlp_hidden', type=int, default=192)
     parser.add_argument('--dropout', type=float, default=0.0)
-    parser.add_argument('--max_features', type=int, default=50)
-    parser.add_argument('--max_samples', type=int, default=50)
-    parser.add_argument('--max_classes', type=int, default=20)
+    parser.add_argument('--max_features', type=int, default=20)
+    parser.add_argument('--max_samples', type=int, default=100)
+    parser.add_argument('--max_classes', type=int, default=10)
     
     # Training arguments
     parser.add_argument('--epochs', type=int, default=100)

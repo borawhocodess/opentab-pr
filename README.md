@@ -9,13 +9,16 @@ An open implementation of TabPFN-like models (Prior-Data Fitted Network for Tabu
 pip install -e .
 
 # Generate synthetic data for classification
-python generate_data.py --n_datasets 100000 --output data/synthetic_clf.h5
+python generate_data.py --prior mixed --n_datasets 100000 --output data/synthetic_clf.h5
+
+# Generate synthetic data for regression
+python generate_data.py --prior mixed_regression --n_datasets 100000 --output data/synthetic_reg.h5
 
 # Train classification model
 python train.py --data data/synthetic_clf.h5 --task classification --epochs 100 --output checkpoints/classifier.pt
 
 # Train regression model (separate model, following TabPFN approach)
-python train.py --online --task regression --epochs 100 --output checkpoints/regressor.pt
+python train.py --data data/synthetic_reg.h5 --task regression --epochs 100 --output checkpoints/regressor.pt
 
 # Evaluate classification (quick test on sklearn datasets)
 python evaluate.py --checkpoint checkpoints/classifier.pt --mode quick
@@ -85,7 +88,8 @@ evaluate.py       # TabArena benchmark + quick evaluation
 
 | Task | Command |
 |------|---------|
-| Generate classification data | `python generate_data.py --n_datasets 100000 --output data/synthetic.h5` |
+| Generate classification data | `python generate_data.py --prior mixed --n_datasets 100000 --output data/clf.h5` |
+| Generate regression data | `python generate_data.py --prior mixed_regression --n_datasets 100000 --output data/reg.h5` |
 | Train classification | `python train.py --online --task classification --epochs 100` |
 | Train regression | `python train.py --online --task regression --epochs 100` |
 | Quick eval (classification) | `python evaluate.py --checkpoint model.pt --mode quick` |

@@ -6,15 +6,21 @@ This module provides tools to evaluate OpenTab on eval data and the TabArena ben
 TabArena is a living benchmark for tabular ML with 51 curated datasets and
 standardized evaluation protocols.
 
+Note: Following TabPFN, OpenTab trains separate models for classification and regression.
+Use OpenTabClassifier for classification tasks and OpenTabRegressor for regression tasks.
+
 Usage:
-    # Quick evaluation on a subset of datasets
-    python evaluate.py --checkpoint checkpoints/best_model.pt --quick
+    # Quick classification evaluation on sklearn datasets
+    python evaluate.py --checkpoint checkpoints/classifier.pt --mode quick
     
-    # Full TabArena-Lite evaluation (all 51 datasets, 1 fold)
-    python evaluate.py --checkpoint checkpoints/best_model.pt --mode lite
+    # Quick regression evaluation on sklearn datasets  
+    python evaluate.py --checkpoint checkpoints/regressor.pt --mode quick-regression
+    
+    # Full TabArena-Lite evaluation (classification only, 51 datasets, 1 fold)
+    python evaluate.py --checkpoint checkpoints/classifier.pt --mode lite
     
     # Full TabArena evaluation (all datasets, all folds)
-    python evaluate.py --checkpoint checkpoints/best_model.pt --mode full
+    python evaluate.py --checkpoint checkpoints/classifier.pt --mode full
 
 Requirements:
     pip install tabarena autogluon openml
@@ -36,7 +42,7 @@ import torch
 import torch.nn.functional as F
 
 # Import our model
-from model import OpenTabModel, OpenTabClassifier
+from model import OpenTabModel, OpenTabClassifier, OpenTabRegressor
 
 # Try importing TabArena dependencies
 try:
@@ -62,12 +68,16 @@ def set_checkpoint_path(path: str):
 
 class OpenTabWrapper(AbstractExecModel):
     """
-    TabArena-compatible wrapper for OpenTab.
+    TabArena-compatible wrapper for OpenTab (Classification).
     
     This wrapper inherits from AbstractExecModel to be compatible with
     TabArena's Experiment class for benchmarking.
     
-    Supports both classification (binary/multiclass) tasks.
+    Supports classification (binary/multiclass) tasks only.
+    For regression, use OpenTabRegressor directly.
+    
+    Note: Following TabPFN, classification and regression are separate models.
+    This wrapper is for classification only.
     
     Note: OpenTab is designed for small datasets (up to ~1000 samples).
     For larger datasets, we subsample the training data.
@@ -439,6 +449,123 @@ def run_quick_evaluation(
     
     print(f"\nResults saved to {output_dir}/quick_eval_results.csv")
     return results_df
+
+
+def quick_eval_regression(
+    checkpoint_path: Optional[str] = None,
+    output_dir: str = 'eval_results',
+):
+    """
+    Quick regression evaluation on sklearn datasets.
+    
+    Uses Diabetes and California Housing for fast regression testing.
+    """
+    from sklearn.datasets import load_diabetes, fetch_california_housing
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+    
+    print("=" * 60)
+    print("Quick Regression Evaluation")
+    print("=" * 60)
+    
+    # Load model
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        regressor = OpenTabRegressor(checkpoint_path)
+        print(f"Loaded model from {checkpoint_path}")
+    else:
+        # Create untrained model
+        model = OpenTabModel(n_outputs=64)  # 64 bins for regression
+        regressor = OpenTabRegressor(model=model)
+        print("Warning: Using untrained model")
+    
+    # Test datasets
+    test_datasets = [
+        ('Diabetes', load_diabetes()),
+    ]
+    
+    # Try to add California Housing
+    try:
+        test_datasets.append(('California', fetch_california_housing()))
+    except Exception:
+        print("Note: California Housing dataset not available offline")
+    
+    results = []
+    
+    for name, data in test_datasets:
+        X, y = data.data, data.target
+        
+        # Use subset for speed
+        n_samples = min(500, len(X))
+        indices = np.random.RandomState(42).choice(len(X), n_samples, replace=False)
+        X, y = X[indices], y[indices]
+        
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.3, random_state=42
+        )
+        
+        # Scale features
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+        
+        # Fit and predict
+        regressor.fit(X_train, y_train)
+        y_pred = regressor.predict(X_test)
+        
+        # Compute metrics
+        mse = mean_squared_error(y_test, y_pred)
+        rmse = np.sqrt(mse)
+        mae = mean_absolute_error(y_test, y_pred)
+        r2 = r2_score(y_test, y_pred)
+        
+        results.append({
+            'dataset': name,
+            'mse': mse,
+            'rmse': rmse,
+            'mae': mae,
+            'r2': r2,
+        })
+        print(f"  {name}:")
+        print(f"    RMSE: {rmse:.4f}")
+        print(f"    MAE:  {mae:.4f}")
+        print(f"    R2:   {r2:.4f}")
+    
+    # Save results
+    os.makedirs(output_dir, exist_ok=True)
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(os.path.join(output_dir, 'quick_eval_regression_results.csv'), index=False)
+    
+    print(f"\nResults saved to {output_dir}/quick_eval_regression_results.csv")
+    return results_df
+
+
+def quick_eval_all(
+    checkpoint_path: Optional[str] = None,
+    output_dir: str = 'eval_results',
+):
+    """
+    Run both classification and regression quick evaluation.
+    
+    Note: Following TabPFN, classification and regression require separate models.
+    This function uses the SAME checkpoint for both, which may not produce good
+    results unless you're testing a model trained on mixed data (not recommended).
+    
+    For proper evaluation:
+    - Use `--mode quick` with classification checkpoint for classification
+    - Use `--mode quick-regression` with regression checkpoint for regression
+    """
+    print("\n" + "=" * 60)
+    print("CLASSIFICATION EVALUATION")
+    print("=" * 60 + "\n")
+    clf_results = quick_eval(checkpoint_path, output_dir)
+    
+    print("\n" + "=" * 60)
+    print("REGRESSION EVALUATION")
+    print("=" * 60 + "\n")
+    reg_results = quick_eval_regression(checkpoint_path, output_dir)
+    
+    return clf_results, reg_results
 
 
 def run_tabarena_lite(
@@ -851,7 +978,7 @@ def main():
     parser.add_argument('--checkpoint', '-c', type=str, default=None,
                        help='Path to model checkpoint')
     parser.add_argument('--mode', '-m', type=str, default='quick',
-                       choices=['quick', 'lite', 'full', 'submit'],
+                       choices=['quick', 'quick-regression', 'quick-all', 'lite', 'full', 'submit'],
                        help='Evaluation mode')
     parser.add_argument('--output', '-o', type=str, default='eval_results',
                        help='Output directory for results')
@@ -862,6 +989,16 @@ def main():
     
     if args.mode == 'quick':
         run_quick_evaluation(
+            checkpoint_path=args.checkpoint,
+            output_dir=args.output,
+        )
+    elif args.mode == 'quick-regression':
+        quick_eval_regression(
+            checkpoint_path=args.checkpoint,
+            output_dir=args.output,
+        )
+    elif args.mode == 'quick-all':
+        quick_eval_all(
             checkpoint_path=args.checkpoint,
             output_dir=args.output,
         )

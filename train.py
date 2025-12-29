@@ -54,9 +54,13 @@ from generate_data import get_prior, SyntheticDataGenerator
 
 # sklearn datasets for real-world evaluation
 try:
-    from sklearn.datasets import load_iris, load_wine, load_breast_cancer
+    from sklearn.datasets import (
+        load_iris, load_wine, load_breast_cancer,
+        load_diabetes, fetch_california_housing
+    )
     from sklearn.model_selection import train_test_split
     from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import mean_squared_error, r2_score
     HAS_SKLEARN = True
 except ImportError:
     HAS_SKLEARN = False
@@ -64,11 +68,17 @@ except ImportError:
 
 @dataclass
 class TrainConfig:
-    """Training configuration."""
+    """Training configuration.
+    
+    Note: Following TabPFN, classification and regression are trained as separate models.
+    Set task_type='classification' for classification or task_type='regression' for regression.
+    The prior_type will be automatically set based on task_type if not explicitly provided.
+    """
     # Data
     data_path: Optional[str] = None  # Path to HDF5 data file
     online_generation: bool = False  # Generate data on-the-fly
-    prior_type: str = 'mixed'  # Prior for online generation
+    prior_type: str = 'mixed'  # Prior for online generation ('mixed' for classification, 'mixed_regression' for regression)
+    task_type: str = 'classification'  # 'classification' or 'regression'
     
     # Model architecture
     embedding_size: int = 96
@@ -109,6 +119,14 @@ class TrainConfig:
     def __post_init__(self):
         if self.device == 'auto':
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        
+        # Auto-select prior based on task_type if using default
+        if self.prior_type == 'mixed' and self.task_type == 'regression':
+            self.prior_type = 'mixed_regression'
+        
+        # Validate task_type
+        if self.task_type not in ('classification', 'regression'):
+            raise ValueError(f"task_type must be 'classification' or 'regression', got '{self.task_type}'")
 
 
 class HDF5Dataset(Dataset):
@@ -549,87 +567,195 @@ class Trainer:
         """Evaluate model on real sklearn datasets for tracking progress.
         
         This provides a quick sanity check on real data during training.
-        Uses small subsets of Iris, Wine, and Breast Cancer datasets.
+        Only evaluates datasets matching the current task_type (classification or regression).
+        
+        Note: Following TabPFN, classification and regression are trained as separate models.
         """
         if not HAS_SKLEARN:
             return
         
         self.model.eval()
         
-        # Small real-world datasets for quick evaluation
-        datasets = [
-            ('Iris', load_iris()),
-            ('Wine', load_wine()),
-            ('Breast Cancer', load_breast_cancer()),
-        ]
-        
         results = {}
-        total_acc = 0.0
         
-        with torch.no_grad():
-            for name, data in datasets:
-                X, y = data.data, data.target
-                
-                # Use small subset for speed
-                n_samples = min(100, len(X))
-                indices = np.random.choice(len(X), n_samples, replace=False)
-                X, y = X[indices], y[indices]
-                
-                # Split
-                X_train, X_test, y_train, y_test = train_test_split(
-                    X, y, test_size=0.3, random_state=42, stratify=y
-                )
-                
-                # Scale
-                scaler = StandardScaler()
-                X_train = scaler.fit_transform(X_train)
-                X_test = scaler.transform(X_test)
-                
-                # Pad to model dimensions
-                n_train, n_features = X_train.shape
-                n_test = X_test.shape[0]
-                n_classes = len(np.unique(y))
-                
-                # Combine train and test
-                X_all = np.zeros((1, n_train + n_test, self.config.max_features), dtype=np.float32)
-                X_all[0, :n_train, :n_features] = X_train
-                X_all[0, n_train:n_train+n_test, :n_features] = X_test
-                
-                y_all = np.zeros((1, n_train + n_test), dtype=np.int64)
-                y_all[0, :n_train] = y_train
-                y_all[0, n_train:n_train+n_test] = y_test
-                
-                # Convert to tensors
-                X_tensor = torch.tensor(X_all, device=self.device)
-                y_train_tensor = torch.tensor(y_all[:, :n_train], device=self.device)
-                
-                # Predict - pass only train labels and train_size as int
-                logits = self.model(X_tensor, y_train_tensor, n_train)
-                
-                # Get predictions on test set
-                test_logits = logits[0, :n_test, :n_classes]
-                preds = test_logits.argmax(dim=-1).cpu().numpy()
-                
-                # Compute accuracy
-                accuracy = (preds == y_test).mean()
-                results[name] = accuracy
-                total_acc += accuracy
+        if self.config.task_type == 'classification':
+            # Classification datasets
+            classification_datasets = [
+                ('Iris', load_iris()),
+                ('Wine', load_wine()),
+                ('Breast Cancer', load_breast_cancer()),
+            ]
+            
+            total_acc = 0.0
+            n_classification = 0
+            
+            with torch.no_grad():
+                for name, data in classification_datasets:
+                    X, y = data.data, data.target
+                    
+                    # Use small subset for speed
+                    n_samples = min(100, len(X))
+                    indices = np.random.choice(len(X), n_samples, replace=False)
+                    X, y = X[indices], y[indices]
+                    
+                    # Split
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X, y, test_size=0.3, random_state=42, stratify=y
+                    )
+                    
+                    # Scale
+                    scaler = StandardScaler()
+                    X_train = scaler.fit_transform(X_train)
+                    X_test = scaler.transform(X_test)
+                    
+                    # Pad to model dimensions
+                    n_train, n_features = X_train.shape
+                    n_test = X_test.shape[0]
+                    n_classes = len(np.unique(y))
+                    
+                    # Combine train and test
+                    X_all = np.zeros((1, n_train + n_test, self.config.max_features), dtype=np.float32)
+                    X_all[0, :n_train, :n_features] = X_train
+                    X_all[0, n_train:n_train+n_test, :n_features] = X_test
+                    
+                    y_all = np.zeros((1, n_train + n_test), dtype=np.int64)
+                    y_all[0, :n_train] = y_train
+                    y_all[0, n_train:n_train+n_test] = y_test
+                    
+                    # Convert to tensors
+                    X_tensor = torch.tensor(X_all, device=self.device)
+                    y_train_tensor = torch.tensor(y_all[:, :n_train], device=self.device)
+                    
+                    # Predict - pass only train labels and train_size as int
+                    logits = self.model(X_tensor, y_train_tensor, n_train)
+                    
+                    # Get predictions on test set
+                    test_logits = logits[0, :n_test, :n_classes]
+                    preds = test_logits.argmax(dim=-1).cpu().numpy()
+                    
+                    # Compute accuracy
+                    accuracy = (preds == y_test).mean()
+                    results[name] = accuracy
+                    total_acc += accuracy
+                    n_classification += 1
+            
+            avg_acc = total_acc / n_classification if n_classification > 0 else 0.0
+            
+            # Log results
+            clf_str = ' | '.join([f"{k}: {v:.3f}" for k, v in results.items()])
+            print(f"\n  Real Eval (Classification) | {clf_str} | Avg: {avg_acc:.3f}\n")
+            
+            self.real_eval_history.append({
+                'step': self.global_step,
+                'results': results,
+                'avg_accuracy': avg_acc,
+            })
+            
+            # Save best model based on real accuracy
+            if avg_acc > self.best_real_accuracy:
+                self.best_real_accuracy = avg_acc
+                self.save_checkpoint(best=True)
         
-        avg_acc = total_acc / len(datasets)
-        
-        # Log results
-        result_str = ' | '.join([f"{k}: {v:.3f}" for k, v in results.items()])
-        print(f"\n  Real Eval | {result_str} | Avg: {avg_acc:.3f}\n")
-        
-        self.real_eval_history.append({
-            'step': self.global_step,
-            'results': results,
-            'avg_accuracy': avg_acc,
-        })
-        
-        # Save best model based on real accuracy
-        if avg_acc > self.best_real_accuracy:
-            self.best_real_accuracy = avg_acc
+        else:  # regression
+            # Regression datasets
+            regression_datasets = [
+                ('Diabetes', load_diabetes()),
+            ]
+            
+            # Try to add California Housing (may not be available offline)
+            try:
+                regression_datasets.append(('California', fetch_california_housing()))
+            except Exception:
+                pass
+            
+            total_r2 = 0.0
+            n_regression = 0
+            
+            with torch.no_grad():
+                for name, data in regression_datasets:
+                    X, y = data.data, data.target
+                    
+                    # Use small subset for speed
+                    n_samples = min(100, len(X))
+                    indices = np.random.choice(len(X), n_samples, replace=False)
+                    X, y = X[indices], y[indices]
+                    
+                    # Split
+                    X_train, X_test, y_train, y_test = train_test_split(
+                        X, y, test_size=0.3, random_state=42
+                    )
+                    
+                    # Scale features
+                    scaler = StandardScaler()
+                    X_train = scaler.fit_transform(X_train)
+                    X_test = scaler.transform(X_test)
+                    
+                    # Scale targets for the model (will use bin indices)
+                    y_scaler = StandardScaler()
+                    y_train_scaled = y_scaler.fit_transform(y_train.reshape(-1, 1)).flatten()
+                    y_test_scaled = y_scaler.transform(y_test.reshape(-1, 1)).flatten()
+                    
+                    # Discretize targets into bins
+                    n_bins = min(self.config.max_classes, 32)
+                    y_min, y_max = y_train_scaled.min(), y_train_scaled.max()
+                    margin = (y_max - y_min) * 0.1 + 1e-6
+                    bin_edges = np.linspace(y_min - margin, y_max + margin, n_bins + 1)
+                    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+                    
+                    y_train_bins = np.clip(np.digitize(y_train_scaled, bin_edges[1:-1]), 0, n_bins - 1)
+                    
+                    # Pad to model dimensions
+                    n_train, n_features = X_train.shape
+                    n_test = X_test.shape[0]
+                    
+                    X_all = np.zeros((1, n_train + n_test, self.config.max_features), dtype=np.float32)
+                    X_all[0, :n_train, :n_features] = X_train
+                    X_all[0, n_train:n_train+n_test, :n_features] = X_test
+                    
+                    y_all = np.zeros((1, n_train + n_test), dtype=np.int64)
+                    y_all[0, :n_train] = y_train_bins
+                    
+                    # Convert to tensors
+                    X_tensor = torch.tensor(X_all, device=self.device)
+                    y_train_tensor = torch.tensor(y_all[:, :n_train], device=self.device)
+                    
+                    # Predict
+                    logits = self.model(X_tensor, y_train_tensor, n_train)
+                    
+                    # Get predictions - use expected value over bin probabilities
+                    test_logits = logits[0, :n_test, :n_bins]
+                    probs = torch.softmax(test_logits, dim=-1).cpu().numpy()
+                    
+                    # Compute mean prediction
+                    bin_centers_t = bin_centers[:n_bins]
+                    preds_scaled = (probs * bin_centers_t).sum(axis=-1)
+                    
+                    # Inverse transform to original scale
+                    preds = y_scaler.inverse_transform(preds_scaled.reshape(-1, 1)).flatten()
+                    
+                    # Compute R2 score
+                    r2 = r2_score(y_test, preds)
+                    r2 = max(-1.0, min(1.0, r2))  # Clip to valid range
+                    
+                    results[f"{name}_R2"] = r2
+                    total_r2 += r2
+                    n_regression += 1
+            
+            avg_r2 = total_r2 / n_regression if n_regression > 0 else 0.0
+            
+            # Log results
+            reg_str = ' | '.join([f"{k}: {v:.3f}" for k, v in results.items()])
+            print(f"\n  Real Eval (Regression) | {reg_str} | Avg R2: {avg_r2:.3f}\n")
+            
+            self.real_eval_history.append({
+                'step': self.global_step,
+                'results': results,
+                'avg_r2': avg_r2,
+            })
+            
+            # Save best model based on R2 score
+            if avg_r2 > self.best_real_accuracy:  # Reusing this variable for R2
+                self.best_real_accuracy = avg_r2
             self.save_checkpoint(best=True)
         
         self.model.train()
@@ -695,8 +821,12 @@ def main():
     parser.add_argument('--online', action='store_true',
                        help='Generate training data on-the-fly')
     parser.add_argument('--prior', type=str, default='mixed',
-                       choices=['mlp', 'gp', 'tree', 'scm', 'mixed'],
-                       help='Prior type for data generation')
+                       choices=['mlp', 'gp', 'tree', 'scm', 'mixed',
+                                'mlp_regression', 'gp_regression', 'linear_regression', 'mixed_regression'],
+                       help='Prior type for data generation (use *_regression for regression task)')
+    parser.add_argument('--task', type=str, default='classification',
+                       choices=['classification', 'regression'],
+                       help='Task type: classification or regression (trains separate models like TabPFN)')
     
     # Model arguments
     parser.add_argument('--embedding_size', type=int, default=96)
@@ -778,6 +908,7 @@ def main():
         seed=args.seed,
         device=args.device,
         num_workers=args.num_workers,
+        task_type=args.task,
     )
     
     # Create trainer

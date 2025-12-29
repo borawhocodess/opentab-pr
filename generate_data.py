@@ -43,7 +43,8 @@ class SyntheticDataset:
     X: np.ndarray  # (n_samples, n_features)
     y: np.ndarray  # (n_samples,)
     train_size: int  # Number of training samples
-    n_classes: int  # Number of classes (for classification)
+    n_classes: int  # Number of classes (for classification), 0 for regression
+    is_regression: bool = False  # Whether this is a regression task
 
 
 class MLPPrior:
@@ -549,14 +550,325 @@ class MixedPrior:
         )
 
 
+# ============================================================================
+# Regression Priors
+# ============================================================================
+
+class MLPRegressionPrior:
+    """
+    Generate regression data using random Multi-Layer Perceptrons.
+    
+    Similar to MLPPrior but outputs continuous values instead of class labels.
+    """
+    
+    def __init__(
+        self,
+        n_layers_range: Tuple[int, int] = (1, 4),
+        hidden_size_range: Tuple[int, int] = (16, 128),
+        activation_options: List[str] = ['relu', 'tanh', 'gelu', 'sigmoid'],
+        weight_scale: float = 1.0,
+        noise_std_range: Tuple[float, float] = (0.01, 0.3),
+    ):
+        self.n_layers_range = n_layers_range
+        self.hidden_size_range = hidden_size_range
+        self.activation_options = activation_options
+        self.weight_scale = weight_scale
+        self.noise_std_range = noise_std_range
+    
+    def _get_activation(self, name: str) -> Callable:
+        activations = {
+            'relu': lambda x: np.maximum(0, x),
+            'tanh': np.tanh,
+            'gelu': lambda x: 0.5 * x * (1 + np.tanh(np.sqrt(2/np.pi) * (x + 0.044715 * x**3))),
+            'sigmoid': lambda x: 1 / (1 + np.exp(-np.clip(x, -500, 500))),
+            'leaky_relu': lambda x: np.where(x > 0, x, 0.01 * x),
+        }
+        return activations.get(name, activations['relu'])
+    
+    def sample_function(self, n_features: int) -> Callable[[np.ndarray], np.ndarray]:
+        """Sample a random MLP function for regression."""
+        n_layers = random.randint(*self.n_layers_range)
+        hidden_sizes = [random.randint(*self.hidden_size_range) for _ in range(n_layers)]
+        activation = self._get_activation(random.choice(self.activation_options))
+        
+        layer_sizes = [n_features] + hidden_sizes + [1]
+        weights = []
+        biases = []
+        
+        for i in range(len(layer_sizes) - 1):
+            scale = self.weight_scale * np.sqrt(2.0 / (layer_sizes[i] + layer_sizes[i+1]))
+            W = np.random.randn(layer_sizes[i], layer_sizes[i+1]) * scale
+            b = np.random.randn(layer_sizes[i+1]) * scale * 0.1
+            weights.append(W)
+            biases.append(b)
+        
+        def forward(X: np.ndarray) -> np.ndarray:
+            h = X
+            for i, (W, b) in enumerate(zip(weights, biases)):
+                h = h @ W + b
+                if i < len(weights) - 1:
+                    h = activation(h)
+            return h.squeeze(-1)
+        
+        return forward
+    
+    def generate(
+        self,
+        n_samples: int,
+        n_features: int,
+        train_ratio: float = 0.7,
+    ) -> SyntheticDataset:
+        """Generate a synthetic regression dataset."""
+        # Sample input features
+        X = self._sample_features(n_samples, n_features)
+        
+        # Sample and apply random function
+        func = self.sample_function(n_features)
+        y = func(X)
+        
+        # Add noise
+        noise_std = random.uniform(*self.noise_std_range)
+        y += np.random.randn(n_samples) * noise_std * (y.std() + 1e-6)
+        
+        # Handle NaN/Inf
+        y = np.nan_to_num(y, nan=0.0, posinf=1e6, neginf=-1e6)
+        y = np.clip(y, -1e6, 1e6)
+        
+        # Determine train/test split
+        train_size = max(1, int(n_samples * train_ratio))
+        train_size = min(train_size, n_samples - 1)
+        
+        return SyntheticDataset(
+            X=X.astype(np.float32),
+            y=y.astype(np.float32),
+            train_size=train_size,
+            n_classes=0,
+            is_regression=True,
+        )
+    
+    def _sample_features(self, n_samples: int, n_features: int) -> np.ndarray:
+        """Sample feature values from various distributions."""
+        X = np.zeros((n_samples, n_features))
+        
+        for i in range(n_features):
+            dist_type = random.choice(['uniform', 'normal', 'mixture'])
+            
+            if dist_type == 'uniform':
+                low = random.uniform(-10, 0)
+                high = random.uniform(0, 10)
+                X[:, i] = np.random.uniform(low, high, n_samples)
+            elif dist_type == 'normal':
+                mean = random.uniform(-5, 5)
+                std = random.uniform(0.1, 3)
+                X[:, i] = np.random.normal(mean, std, n_samples)
+            else:
+                n_components = random.randint(2, 4)
+                means = np.random.uniform(-5, 5, n_components)
+                stds = np.random.uniform(0.1, 2, n_components)
+                component_idx = np.random.choice(n_components, n_samples)
+                X[:, i] = np.array([
+                    np.random.normal(means[c], stds[c])
+                    for c in component_idx
+                ])
+        
+        return X
+
+
+class GPRegressionPrior:
+    """
+    Generate regression data using Gaussian Processes.
+    
+    GPs provide smooth function samples ideal for regression.
+    """
+    
+    def __init__(
+        self,
+        lengthscale_range: Tuple[float, float] = (0.1, 2.0),
+        outputscale_range: Tuple[float, float] = (0.5, 2.0),
+        noise_std_range: Tuple[float, float] = (0.01, 0.2),
+    ):
+        self.lengthscale_range = lengthscale_range
+        self.outputscale_range = outputscale_range
+        self.noise_std_range = noise_std_range
+    
+    def _rbf_kernel(
+        self, 
+        X1: np.ndarray, 
+        X2: np.ndarray, 
+        lengthscale: float,
+        outputscale: float,
+    ) -> np.ndarray:
+        X1_sq = np.sum(X1**2, axis=1, keepdims=True)
+        X2_sq = np.sum(X2**2, axis=1, keepdims=True)
+        dist_sq = X1_sq + X2_sq.T - 2 * X1 @ X2.T
+        K = outputscale * np.exp(-0.5 * dist_sq / lengthscale**2)
+        return K
+    
+    def sample_function_values(self, X: np.ndarray) -> np.ndarray:
+        """Sample function values at given points from a GP."""
+        n_samples = X.shape[0]
+        
+        lengthscale = random.uniform(*self.lengthscale_range)
+        outputscale = random.uniform(*self.outputscale_range)
+        
+        K = self._rbf_kernel(X, X, lengthscale, outputscale)
+        K += np.eye(n_samples) * 1e-6
+        
+        try:
+            L = np.linalg.cholesky(K)
+            z = np.random.randn(n_samples)
+            f = L @ z
+        except np.linalg.LinAlgError:
+            f = np.random.randn(n_samples)
+        
+        return f
+    
+    def generate(
+        self,
+        n_samples: int,
+        n_features: int,
+        train_ratio: float = 0.7,
+    ) -> SyntheticDataset:
+        """Generate a synthetic regression dataset."""
+        X = np.random.uniform(-3, 3, (n_samples, n_features))
+        
+        y = self.sample_function_values(X)
+        
+        # Add noise
+        noise_std = random.uniform(*self.noise_std_range)
+        y += np.random.randn(n_samples) * noise_std
+        
+        y = np.nan_to_num(y, nan=0.0, posinf=1e6, neginf=-1e6)
+        y = np.clip(y, -1e6, 1e6)
+        
+        train_size = max(1, int(n_samples * train_ratio))
+        train_size = min(train_size, n_samples - 1)
+        
+        return SyntheticDataset(
+            X=X.astype(np.float32),
+            y=y.astype(np.float32),
+            train_size=train_size,
+            n_classes=0,
+            is_regression=True,
+        )
+
+
+class LinearRegressionPrior:
+    """
+    Generate regression data using random linear functions with optional
+    polynomial features and interactions.
+    """
+    
+    def __init__(
+        self,
+        include_interactions: bool = True,
+        max_polynomial_degree: int = 3,
+        noise_std_range: Tuple[float, float] = (0.01, 0.3),
+    ):
+        self.include_interactions = include_interactions
+        self.max_polynomial_degree = max_polynomial_degree
+        self.noise_std_range = noise_std_range
+    
+    def generate(
+        self,
+        n_samples: int,
+        n_features: int,
+        train_ratio: float = 0.7,
+    ) -> SyntheticDataset:
+        """Generate a synthetic regression dataset."""
+        X = np.random.uniform(-3, 3, (n_samples, n_features))
+        
+        # Random coefficients
+        coeffs = np.random.randn(n_features) * 2
+        
+        # Linear term
+        y = X @ coeffs
+        
+        # Add polynomial terms
+        if self.max_polynomial_degree > 1:
+            degree = random.randint(2, self.max_polynomial_degree)
+            for d in range(2, degree + 1):
+                # Select random features for polynomial
+                n_poly_features = random.randint(1, min(3, n_features))
+                poly_features = np.random.choice(n_features, n_poly_features, replace=False)
+                for f in poly_features:
+                    coeff = np.random.randn() * 0.5
+                    y += coeff * (X[:, f] ** d)
+        
+        # Add interaction terms
+        if self.include_interactions and n_features > 1:
+            n_interactions = random.randint(1, min(5, n_features * (n_features - 1) // 2))
+            for _ in range(n_interactions):
+                f1, f2 = np.random.choice(n_features, 2, replace=False)
+                coeff = np.random.randn() * 0.3
+                y += coeff * X[:, f1] * X[:, f2]
+        
+        # Add noise
+        noise_std = random.uniform(*self.noise_std_range)
+        y += np.random.randn(n_samples) * noise_std * (y.std() + 1e-6)
+        
+        y = np.nan_to_num(y, nan=0.0, posinf=1e6, neginf=-1e6)
+        y = np.clip(y, -1e6, 1e6)
+        
+        train_size = max(1, int(n_samples * train_ratio))
+        train_size = min(train_size, n_samples - 1)
+        
+        return SyntheticDataset(
+            X=X.astype(np.float32),
+            y=y.astype(np.float32),
+            train_size=train_size,
+            n_classes=0,
+            is_regression=True,
+        )
+
+
+class MixedRegressionPrior:
+    """
+    Mixture of multiple regression priors for diverse training data.
+    """
+    
+    def __init__(
+        self,
+        priors: Optional[List[Any]] = None,
+        weights: Optional[List[float]] = None,
+    ):
+        if priors is None:
+            priors = [MLPRegressionPrior(), GPRegressionPrior(), LinearRegressionPrior()]
+        if weights is None:
+            weights = [1.0] * len(priors)
+        
+        self.priors = priors
+        self.weights = np.array(weights) / sum(weights)
+    
+    def generate(
+        self,
+        n_samples: int,
+        n_features: int,
+        train_ratio: float = 0.7,
+    ) -> SyntheticDataset:
+        """Generate a synthetic regression dataset using a random prior."""
+        prior_idx = np.random.choice(len(self.priors), p=self.weights)
+        return self.priors[prior_idx].generate(n_samples, n_features, train_ratio)
+
+
 def get_prior(prior_type: str, **kwargs) -> Any:
-    """Get a prior by name."""
+    """Get a prior by name.
+    
+    Note: Following TabPFN, classification and regression are trained as separate models.
+    Use 'mixed' for classification and 'mixed_regression' for regression.
+    """
     priors = {
+        # Classification priors
         'mlp': MLPPrior,
         'gp': GPPrior,
         'tree': TreePrior,
         'scm': SCMPrior,
         'mixed': MixedPrior,
+        # Regression priors
+        'mlp_regression': MLPRegressionPrior,
+        'gp_regression': GPRegressionPrior,
+        'linear_regression': LinearRegressionPrior,
+        'mixed_regression': MixedRegressionPrior,
     }
     if prior_type not in priors:
         raise ValueError(f"Unknown prior: {prior_type}. Available: {list(priors.keys())}")
@@ -753,8 +1065,9 @@ def main():
     parser.add_argument('--max_classes', type=int, default=10,
                        help='Maximum number of classes')
     parser.add_argument('--prior', type=str, default='mixed',
-                       choices=['mlp', 'gp', 'tree', 'scm', 'mixed'],
-                       help='Prior type to use')
+                       choices=['mlp', 'gp', 'tree', 'scm', 'mixed',
+                                'mlp_regression', 'gp_regression', 'linear_regression', 'mixed_regression'],
+                       help='Prior type to use (use *_regression for regression data)')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
     parser.add_argument('--visualize', action='store_true',

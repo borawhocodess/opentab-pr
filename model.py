@@ -434,6 +434,233 @@ class OpenTabClassifier:
         return probs.argmax(axis=1)
 
 
+class OpenTabRegressor:
+    """Sklearn-like interface for OpenTab regression.
+    
+    For regression, the model outputs a distribution over target values
+    using a binning approach (Bar Distribution). The model predicts
+    probabilities over bins, and we can extract mean, median, or quantiles.
+    
+    Usage:
+        reg = OpenTabRegressor("checkpoint.pt")
+        reg.fit(X_train, y_train)
+        predictions = reg.predict(X_test)  # Returns mean predictions
+    """
+    
+    # Number of bins for target discretization (like TabPFN)
+    N_BINS = 64
+    
+    def __init__(
+        self,
+        model: Union[OpenTabModel, str, None] = None,
+        device: Optional[str] = None,
+        n_bins: int = 64,
+    ):
+        """
+        Args:
+            model: Either a OpenTabModel instance or path to checkpoint
+            device: Device to use ('cuda', 'cpu', or None for auto)
+            n_bins: Number of bins for target discretization
+        """
+        if device is None:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = torch.device(device)
+        self.n_bins = n_bins
+        
+        if model is None:
+            # Create default model with n_bins outputs for regression
+            self.model = OpenTabModel(n_outputs=n_bins).to(self.device)
+        elif isinstance(model, str):
+            # Load from checkpoint
+            checkpoint = torch.load(model, map_location=self.device, weights_only=False)
+            if isinstance(checkpoint, dict) and 'model_state' in checkpoint:
+                config = checkpoint.get('config', {})
+                # For regression, n_outputs should be n_bins
+                self.model = OpenTabModel(
+                    embedding_size=config.get('embedding_size', 96),
+                    n_heads=config.get('n_heads', 4),
+                    mlp_hidden_size=config.get('mlp_hidden', 192),
+                    n_layers=config.get('n_layers', 3),
+                    n_outputs=config.get('n_bins', config.get('max_classes', n_bins)),
+                    dropout=config.get('dropout', 0.0),
+                ).to(self.device)
+                self.model.load_state_dict(checkpoint['model_state'])
+            elif isinstance(checkpoint, dict) and 'model' in checkpoint:
+                self.model = OpenTabModel(
+                    **checkpoint.get('architecture', {})
+                ).to(self.device)
+                self.model.load_state_dict(checkpoint['model'])
+            else:
+                self.model = OpenTabModel(n_outputs=n_bins).to(self.device)
+                self.model.load_state_dict(checkpoint)
+        else:
+            self.model = model.to(self.device)
+        
+        self.model.eval()
+        
+        # Storage for fit data
+        self.X_train_ = None
+        self.y_train_ = None
+        self.y_train_raw_ = None  # Store raw values before normalization
+        
+        # Target normalization parameters
+        self.y_mean_ = None
+        self.y_std_ = None
+        
+        # Bin boundaries (computed during fit)
+        self.bin_edges_ = None
+        self.bin_centers_ = None
+    
+    def _create_bins(self, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Create bin edges and centers for target discretization.
+        
+        Uses a mixture of uniform and quantile-based binning for robustness.
+        """
+        y_min, y_max = y.min(), y.max()
+        
+        # Add margin to handle extrapolation
+        margin = (y_max - y_min) * 0.1 + 1e-6
+        y_min -= margin
+        y_max += margin
+        
+        # Create bin edges (uniform spacing in normalized space)
+        bin_edges = np.linspace(y_min, y_max, self.n_bins + 1)
+        bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2
+        
+        return bin_edges.astype(np.float32), bin_centers.astype(np.float32)
+    
+    def _discretize_targets(self, y: np.ndarray) -> np.ndarray:
+        """Convert continuous targets to bin indices."""
+        # Clip to bin range
+        y_clipped = np.clip(y, self.bin_edges_[0], self.bin_edges_[-1])
+        # Find bin indices
+        bin_indices = np.digitize(y_clipped, self.bin_edges_[1:-1])
+        return bin_indices.astype(np.int64)
+    
+    def fit(self, X: np.ndarray, y: np.ndarray):
+        """Store training data for later prediction.
+        
+        Args:
+            X: Training features (n_samples, n_features)
+            y: Training targets (n_samples,) - continuous values
+        """
+        self.X_train_ = X.astype(np.float32)
+        self.y_train_raw_ = y.astype(np.float32)
+        
+        # Normalize targets
+        self.y_mean_ = float(y.mean())
+        self.y_std_ = float(y.std()) + 1e-8
+        y_normalized = (y - self.y_mean_) / self.y_std_
+        
+        # Create bins in normalized space
+        self.bin_edges_, self.bin_centers_ = self._create_bins(y_normalized)
+        
+        # Discretize targets for the model
+        self.y_train_ = self._discretize_targets(y_normalized)
+        
+        return self
+    
+    def predict(self, X: np.ndarray, output_type: str = 'mean') -> np.ndarray:
+        """Predict target values for test samples.
+        
+        Args:
+            X: Test features (n_samples, n_features)
+            output_type: Type of prediction ('mean', 'median', 'mode')
+            
+        Returns:
+            Predicted target values (n_samples,)
+        """
+        if self.X_train_ is None:
+            raise ValueError("Must call fit() before predict()")
+        
+        X_test = X.astype(np.float32)
+        
+        with torch.no_grad():
+            # Add batch dimension
+            X_train_t = torch.from_numpy(self.X_train_).unsqueeze(0).to(self.device)
+            y_train_t = torch.from_numpy(self.y_train_).float().unsqueeze(0).to(self.device)
+            X_test_t = torch.from_numpy(X_test).unsqueeze(0).to(self.device)
+            
+            # Forward pass
+            logits = self.model.forward_train_test(X_train_t, y_train_t, X_test_t)
+            
+            # Get probabilities over bins
+            probs = F.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
+            
+            # Convert to predictions based on output_type
+            bin_centers = self.bin_centers_
+            
+            if output_type == 'mean':
+                # Expected value: sum of bin_center * probability
+                predictions = (probs * bin_centers).sum(axis=-1)
+            elif output_type == 'median':
+                # Find bin where cumulative probability crosses 0.5
+                cumprobs = np.cumsum(probs, axis=-1)
+                median_bins = (cumprobs >= 0.5).argmax(axis=-1)
+                predictions = bin_centers[median_bins]
+            elif output_type == 'mode':
+                # Most likely bin
+                mode_bins = probs.argmax(axis=-1)
+                predictions = bin_centers[mode_bins]
+            else:
+                raise ValueError(f"Unknown output_type: {output_type}")
+            
+            # Denormalize predictions
+            predictions = predictions * self.y_std_ + self.y_mean_
+            
+            return predictions
+    
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        """Predict probability distribution over bins.
+        
+        Args:
+            X: Test features (n_samples, n_features)
+            
+        Returns:
+            Probabilities over bins (n_samples, n_bins)
+        """
+        if self.X_train_ is None:
+            raise ValueError("Must call fit() before predict()")
+        
+        X_test = X.astype(np.float32)
+        
+        with torch.no_grad():
+            X_train_t = torch.from_numpy(self.X_train_).unsqueeze(0).to(self.device)
+            y_train_t = torch.from_numpy(self.y_train_).float().unsqueeze(0).to(self.device)
+            X_test_t = torch.from_numpy(X_test).unsqueeze(0).to(self.device)
+            
+            logits = self.model.forward_train_test(X_train_t, y_train_t, X_test_t)
+            probs = F.softmax(logits, dim=-1).squeeze(0).cpu().numpy()
+            
+            return probs
+    
+    def predict_quantiles(self, X: np.ndarray, quantiles: list = None) -> np.ndarray:
+        """Predict quantiles of the target distribution.
+        
+        Args:
+            X: Test features (n_samples, n_features)
+            quantiles: List of quantiles to predict (default: [0.1, 0.5, 0.9])
+            
+        Returns:
+            Quantile predictions (n_samples, n_quantiles)
+        """
+        if quantiles is None:
+            quantiles = [0.1, 0.5, 0.9]
+        
+        probs = self.predict_proba(X)
+        cumprobs = np.cumsum(probs, axis=-1)
+        
+        results = []
+        for q in quantiles:
+            q_bins = (cumprobs >= q).argmax(axis=-1)
+            q_values = self.bin_centers_[q_bins]
+            # Denormalize
+            q_values = q_values * self.y_std_ + self.y_mean_
+            results.append(q_values)
+        
+        return np.stack(results, axis=-1)
+
+
 def count_parameters(model: nn.Module) -> int:
     """Count trainable parameters in a model."""
     return sum(p.numel() for p in model.parameters() if p.requires_grad)

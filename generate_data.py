@@ -45,6 +45,291 @@ class SyntheticDataset:
     train_size: int  # Number of training samples
     n_classes: int  # Number of classes (for classification), 0 for regression
     is_regression: bool = False  # Whether this is a regression task
+    categorical_mask: Optional[np.ndarray] = None  # (n_features,) bool - True if feature is categorical
+    missing_mask: Optional[np.ndarray] = None  # (n_samples, n_features) bool - True if value is missing
+    n_categories: Optional[np.ndarray] = None  # (n_features,) int - number of categories per feature (0 if continuous)
+
+
+# ============================================================================
+# Feature Augmentation - Following TabPFN Paper
+# ============================================================================
+
+class FeatureAugmenter:
+    """
+    Augments synthetic data with realistic real-world characteristics.
+    
+    Following TabPFN, this class adds:
+    1. Categorical features (ordinal encoding)
+    2. Missing values (random masking)
+    3. Feature noise and transformations
+    
+    This is applied AFTER generating base synthetic data from a prior.
+    """
+    
+    def __init__(
+        self,
+        categorical_prob: float = 0.3,  # Probability of a feature being categorical
+        missing_prob: float = 0.1,  # Probability of a value being missing
+        n_categories_range: Tuple[int, int] = (2, 10),  # Range for number of categories
+        missing_indicator_value: float = -999.0,  # Value to use for missing
+        add_noise: bool = True,
+        noise_std: float = 0.01,
+    ):
+        self.categorical_prob = categorical_prob
+        self.missing_prob = missing_prob
+        self.n_categories_range = n_categories_range
+        self.missing_indicator_value = missing_indicator_value
+        self.add_noise = add_noise
+        self.noise_std = noise_std
+    
+    def augment(self, dataset: 'SyntheticDataset') -> 'SyntheticDataset':
+        """
+        Apply augmentations to a synthetic dataset.
+        
+        Args:
+            dataset: A SyntheticDataset with continuous features
+            
+        Returns:
+            Augmented SyntheticDataset with categorical/missing metadata
+        """
+        X = dataset.X.copy()
+        n_samples, n_features = X.shape
+        
+        # Initialize masks
+        categorical_mask = np.zeros(n_features, dtype=bool)
+        n_categories = np.zeros(n_features, dtype=np.int32)
+        missing_mask = np.zeros((n_samples, n_features), dtype=bool)
+        
+        # Apply categorical transformation to random features
+        for i in range(n_features):
+            if random.random() < self.categorical_prob:
+                X, categorical_mask, n_categories = self._make_categorical(
+                    X, i, categorical_mask, n_categories
+                )
+        
+        # Apply missing values
+        if self.missing_prob > 0:
+            X, missing_mask = self._add_missing_values(X, n_samples, n_features)
+        
+        # Add noise to continuous features
+        if self.add_noise:
+            X = self._add_feature_noise(X, categorical_mask, missing_mask)
+        
+        return SyntheticDataset(
+            X=X.astype(np.float32),
+            y=dataset.y,
+            train_size=dataset.train_size,
+            n_classes=dataset.n_classes,
+            is_regression=dataset.is_regression,
+            categorical_mask=categorical_mask,
+            missing_mask=missing_mask,
+            n_categories=n_categories,
+        )
+    
+    def _make_categorical(
+        self,
+        X: np.ndarray,
+        feature_idx: int,
+        categorical_mask: np.ndarray,
+        n_categories: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Convert a continuous feature to categorical via binning."""
+        n_cats = random.randint(*self.n_categories_range)
+        
+        # Use percentile-based binning for robustness
+        feature_values = X[:, feature_idx]
+        percentiles = np.linspace(0, 100, n_cats + 1)[1:-1]
+        thresholds = np.percentile(feature_values, percentiles)
+        
+        # Ordinal encode: value becomes integer category
+        X[:, feature_idx] = np.digitize(feature_values, thresholds).astype(np.float32)
+        
+        categorical_mask[feature_idx] = True
+        n_categories[feature_idx] = n_cats
+        
+        return X, categorical_mask, n_categories
+    
+    def _add_missing_values(
+        self,
+        X: np.ndarray,
+        n_samples: int,
+        n_features: int,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Add missing values following TabPFN patterns."""
+        missing_mask = np.zeros((n_samples, n_features), dtype=bool)
+        
+        # Different missing patterns (TabPFN uses multiple)
+        pattern = random.choice(['random', 'column', 'row', 'block'])
+        
+        if pattern == 'random':
+            # Completely random missingness
+            missing_mask = np.random.rand(n_samples, n_features) < self.missing_prob
+            
+        elif pattern == 'column':
+            # Some columns have high missingness
+            n_missing_cols = random.randint(1, max(1, n_features // 3))
+            missing_cols = np.random.choice(n_features, n_missing_cols, replace=False)
+            for col in missing_cols:
+                col_missing_prob = random.uniform(0.1, 0.5)
+                missing_mask[:, col] = np.random.rand(n_samples) < col_missing_prob
+                
+        elif pattern == 'row':
+            # Some rows have high missingness
+            n_missing_rows = random.randint(1, max(1, n_samples // 5))
+            missing_rows = np.random.choice(n_samples, n_missing_rows, replace=False)
+            for row in missing_rows:
+                n_missing_features = random.randint(1, max(1, n_features // 2))
+                missing_features = np.random.choice(n_features, n_missing_features, replace=False)
+                missing_mask[row, missing_features] = True
+                
+        elif pattern == 'block':
+            # Block missingness (correlated)
+            block_size = random.randint(2, max(2, min(n_samples // 4, n_features // 2)))
+            start_row = random.randint(0, max(0, n_samples - block_size))
+            start_col = random.randint(0, max(0, n_features - block_size))
+            n_block_rows = min(block_size, n_samples - start_row)
+            n_block_cols = min(block_size, n_features - start_col)
+            missing_mask[start_row:start_row+n_block_rows, start_col:start_col+n_block_cols] = True
+        
+        # Ensure at least some non-missing values per feature
+        for col in range(n_features):
+            if missing_mask[:, col].sum() > n_samples * 0.8:
+                # Keep at least 20% non-missing
+                missing_idx = np.where(missing_mask[:, col])[0]
+                n_to_keep = int(n_samples * 0.2)
+                keep_idx = np.random.choice(missing_idx, min(len(missing_idx), n_to_keep), replace=False)
+                missing_mask[keep_idx, col] = False
+        
+        # Apply missing indicator value
+        X[missing_mask] = self.missing_indicator_value
+        
+        return X, missing_mask
+    
+    def _add_feature_noise(
+        self,
+        X: np.ndarray,
+        categorical_mask: np.ndarray,
+        missing_mask: np.ndarray,
+    ) -> np.ndarray:
+        """Add small noise to continuous features (not categorical or missing)."""
+        continuous_mask = ~categorical_mask
+        for i in range(X.shape[1]):
+            if continuous_mask[i]:
+                # Add noise only to non-missing values
+                non_missing = ~missing_mask[:, i]
+                if non_missing.any():
+                    feature_std = X[non_missing, i].std() + 1e-8
+                    noise = np.random.randn(non_missing.sum()) * self.noise_std * feature_std
+                    X[non_missing, i] += noise
+        return X
+
+
+class AugmentedPrior:
+    """
+    Wrapper that applies FeatureAugmenter to any base prior.
+    
+    This combines synthetic data generation with realistic augmentation,
+    following the TabPFN approach.
+    
+    Usage:
+        base_prior = MixedPrior()
+        augmented = AugmentedPrior(base_prior, categorical_prob=0.3, missing_prob=0.1)
+        dataset = augmented.generate(n_samples=100, n_features=10, n_classes=2)
+    """
+    
+    def __init__(
+        self,
+        base_prior: Any,
+        categorical_prob: float = 0.3,
+        missing_prob: float = 0.1,
+        n_categories_range: Tuple[int, int] = (2, 10),
+        augment_prob: float = 0.7,  # Probability of applying augmentation
+    ):
+        self.base_prior = base_prior
+        self.augmenter = FeatureAugmenter(
+            categorical_prob=categorical_prob,
+            missing_prob=missing_prob,
+            n_categories_range=n_categories_range,
+        )
+        self.augment_prob = augment_prob
+    
+    def generate(
+        self,
+        n_samples: int,
+        n_features: int,
+        n_classes: int = 2,
+        train_ratio: float = 0.7,
+    ) -> SyntheticDataset:
+        """Generate an augmented synthetic dataset."""
+        # Generate base dataset
+        dataset = self.base_prior.generate(n_samples, n_features, n_classes, train_ratio)
+        
+        # Apply augmentation with some probability
+        if random.random() < self.augment_prob:
+            dataset = self.augmenter.augment(dataset)
+        else:
+            # No augmentation - still create empty masks
+            dataset = SyntheticDataset(
+                X=dataset.X,
+                y=dataset.y,
+                train_size=dataset.train_size,
+                n_classes=dataset.n_classes,
+                is_regression=dataset.is_regression,
+                categorical_mask=np.zeros(n_features, dtype=bool),
+                missing_mask=np.zeros((n_samples, n_features), dtype=bool),
+                n_categories=np.zeros(n_features, dtype=np.int32),
+            )
+        
+        return dataset
+
+
+class AugmentedRegressionPrior:
+    """
+    Wrapper that applies FeatureAugmenter to regression priors.
+    """
+    
+    def __init__(
+        self,
+        base_prior: Any,
+        categorical_prob: float = 0.3,
+        missing_prob: float = 0.1,
+        n_categories_range: Tuple[int, int] = (2, 10),
+        augment_prob: float = 0.7,
+    ):
+        self.base_prior = base_prior
+        self.augmenter = FeatureAugmenter(
+            categorical_prob=categorical_prob,
+            missing_prob=missing_prob,
+            n_categories_range=n_categories_range,
+        )
+        self.augment_prob = augment_prob
+    
+    def generate(
+        self,
+        n_samples: int,
+        n_features: int,
+        train_ratio: float = 0.7,
+    ) -> SyntheticDataset:
+        """Generate an augmented synthetic regression dataset."""
+        # Generate base dataset
+        dataset = self.base_prior.generate(n_samples, n_features, train_ratio)
+        
+        # Apply augmentation with some probability
+        if random.random() < self.augment_prob:
+            dataset = self.augmenter.augment(dataset)
+        else:
+            dataset = SyntheticDataset(
+                X=dataset.X,
+                y=dataset.y,
+                train_size=dataset.train_size,
+                n_classes=0,
+                is_regression=True,
+                categorical_mask=np.zeros(n_features, dtype=bool),
+                missing_mask=np.zeros((n_samples, n_features), dtype=bool),
+                n_categories=np.zeros(n_features, dtype=np.int32),
+            )
+        
+        return dataset
 
 
 class MLPPrior:
@@ -856,7 +1141,15 @@ def get_prior(prior_type: str, **kwargs) -> Any:
     
     Note: Following TabPFN, classification and regression are trained as separate models.
     Use 'mixed' for classification and 'mixed_regression' for regression.
+    
+    Augmented variants (e.g., 'augmented_mixed') add categorical features, 
+    missing values, and noise following TabPFN's preprocessing approach.
     """
+    # Extract augmentation parameters
+    categorical_prob = kwargs.pop('categorical_prob', 0.3)
+    missing_prob = kwargs.pop('missing_prob', 0.1)
+    augment_prob = kwargs.pop('augment_prob', 0.7)
+    
     priors = {
         # Classification priors
         'mlp': MLPPrior,
@@ -870,8 +1163,33 @@ def get_prior(prior_type: str, **kwargs) -> Any:
         'linear_regression': LinearRegressionPrior,
         'mixed_regression': MixedRegressionPrior,
     }
+    
+    # Check for augmented variants
+    if prior_type.startswith('augmented_'):
+        base_type = prior_type[len('augmented_'):]
+        if base_type not in priors:
+            raise ValueError(f"Unknown base prior: {base_type}. Available: {list(priors.keys())}")
+        
+        base_prior = priors[base_type](**kwargs)
+        
+        # Check if it's a regression prior
+        if 'regression' in base_type:
+            return AugmentedRegressionPrior(
+                base_prior=base_prior,
+                categorical_prob=categorical_prob,
+                missing_prob=missing_prob,
+                augment_prob=augment_prob,
+            )
+        else:
+            return AugmentedPrior(
+                base_prior=base_prior,
+                categorical_prob=categorical_prob,
+                missing_prob=missing_prob,
+                augment_prob=augment_prob,
+            )
+    
     if prior_type not in priors:
-        raise ValueError(f"Unknown prior: {prior_type}. Available: {list(priors.keys())}")
+        raise ValueError(f"Unknown prior: {prior_type}. Available: {list(priors.keys())} + augmented_* variants")
     return priors[prior_type](**kwargs)
 
 

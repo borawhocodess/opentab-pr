@@ -23,39 +23,101 @@ import torch.nn.functional as F
 from typing import Tuple, Optional, Union
 
 
+# Special value used to indicate missing during training/inference
+MISSING_INDICATOR = -999.0
+
+
 class FeatureEncoder(nn.Module):
     """Encodes scalar feature values into dense embeddings.
     
     Each feature value is normalized based on training statistics,
     then projected to an embedding space.
+    
+    Following TabPFN, this encoder handles missing values by:
+    1. Detecting missing indicator values (-999.0)
+    2. Using a learned embedding for missing values
+    3. Adding a missing indicator embedding to the feature embedding
     """
     
     def __init__(self, embedding_size: int):
         super().__init__()
+        self.embedding_size = embedding_size
         self.linear = nn.Linear(1, embedding_size)
+        
+        # Learned embedding for missing values (replaces the feature embedding)
+        self.missing_embedding = nn.Parameter(torch.randn(embedding_size) * 0.02)
+        
+        # Learned indicator that a value is missing (added to embedding)
+        self.missing_indicator_embedding = nn.Parameter(torch.randn(embedding_size) * 0.02)
     
-    def forward(self, x: torch.Tensor, train_size: int) -> torch.Tensor:
+    def forward(
+        self, 
+        x: torch.Tensor, 
+        train_size: int,
+        missing_indicator: float = MISSING_INDICATOR,
+    ) -> torch.Tensor:
         """
         Args:
             x: (batch, rows, features) tensor of feature values
             train_size: number of training samples (for normalization)
+            missing_indicator: value used to mark missing data
             
         Returns:
             (batch, rows, features, embedding_size) tensor of embeddings
         """
-        # Normalize features based on training data statistics
-        x = x.unsqueeze(-1)  # (batch, rows, features, 1)
+        batch, rows, features = x.shape
         
-        # Compute mean and std from training portion only
+        # Detect missing values (using approximate comparison for float)
+        missing_mask = (x < missing_indicator + 1) & (x > missing_indicator - 1)
+        
+        # Replace missing values with 0 for normalization computation
+        x_filled = x.clone()
+        x_filled[missing_mask] = 0.0
+        
+        x_filled = x_filled.unsqueeze(-1)  # (batch, rows, features, 1)
+        
+        # Compute mean and std from training portion only, excluding missing
         train_x = x[:, :train_size]
-        mean = train_x.mean(dim=1, keepdim=True)
-        std = train_x.std(dim=1, keepdim=True) + 1e-8
+        train_missing_mask = missing_mask[:, :train_size]
+        
+        # Mask out missing values for statistics computation
+        train_x_masked = train_x.clone()
+        train_x_masked[train_missing_mask] = float('nan')
+        
+        # Compute stats ignoring NaN (missing values)
+        mean = torch.nanmean(train_x_masked, dim=1, keepdim=True)
+        
+        # Handle case where all values are missing
+        mean = torch.where(torch.isnan(mean), torch.zeros_like(mean), mean)
+        
+        # Compute std (handling missing values)
+        train_x_centered = train_x_masked - mean
+        train_x_centered[train_missing_mask] = 0.0
+        n_valid = (~train_missing_mask).float().sum(dim=1, keepdim=True).clamp(min=1)
+        var = (train_x_centered ** 2).sum(dim=1, keepdim=True) / n_valid
+        std = torch.sqrt(var + 1e-8)
         
         # Normalize all data (train + test) using training statistics
-        x = (x - mean) / std
-        x = torch.clamp(x, -100, 100)  # Prevent extreme values
+        x_normalized = (x_filled - mean.unsqueeze(-1)) / std.unsqueeze(-1)
+        x_normalized = torch.clamp(x_normalized, -100, 100)
         
-        return self.linear(x)
+        # Get base embeddings
+        embeddings = self.linear(x_normalized)  # (batch, rows, features, embedding_size)
+        
+        # Apply missing value handling
+        # For missing values, replace with learned missing embedding
+        missing_mask_expanded = missing_mask.unsqueeze(-1).expand(-1, -1, -1, self.embedding_size)
+        embeddings = torch.where(
+            missing_mask_expanded,
+            self.missing_embedding.view(1, 1, 1, -1).expand(batch, rows, features, -1),
+            embeddings
+        )
+        
+        # Add missing indicator to all positions that were missing
+        # This helps the model learn that missingness itself is informative
+        embeddings = embeddings + missing_mask_expanded.float() * self.missing_indicator_embedding.view(1, 1, 1, -1)
+        
+        return embeddings
 
 
 class TargetEncoder(nn.Module):

@@ -96,8 +96,12 @@ class OpenTabWrapper(AbstractExecModel):
         self._device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self._feature_columns = None
     
-    def _fit(self, X: pd.DataFrame, y: pd.Series, X_val=None, y_val=None, **kwargs):
+    def _fit(self, X: pd.DataFrame, y: pd.Series, X_val=None, y_val=None,
+             num_cpus=1, num_gpus=0, time_limit=None, **kwargs):
         """Fit the OpenTab model on training data."""
+        # Set device based on available resources
+        self._device = 'cuda' if num_gpus > 0 and torch.cuda.is_available() else 'cpu'
+        
         # Limit number of features first
         if X.shape[1] > self.MAX_FEATURES:
             # Keep only the first MAX_FEATURES columns
@@ -159,8 +163,18 @@ class OpenTabWrapper(AbstractExecModel):
         
         return self
     
+    # Special value used to indicate missing during training
+    MISSING_INDICATOR = -999.0
+    
     def _preprocess_X(self, X: pd.DataFrame) -> np.ndarray:
-        """Preprocess features for OpenTab."""
+        """
+        Preprocess features for OpenTab following TabPFN conventions.
+        
+        Handles:
+        1. Categorical features: ordinal encoding (matches training prior)
+        2. Missing values: replaced with special indicator value
+        3. Feature subsetting: only use features seen during training
+        """
         X = X.copy()
         
         # Limit features if we did so during training
@@ -169,17 +183,27 @@ class OpenTabWrapper(AbstractExecModel):
             available_cols = [c for c in self._feature_columns if c in X.columns]
             missing_cols = [c for c in self._feature_columns if c not in X.columns]
             X = X[available_cols]
-            # Add missing columns as zeros
+            # Add missing columns with indicator value
             for col in missing_cols:
-                X[col] = 0.0
+                X[col] = self.MISSING_INDICATOR
             X = X[self._feature_columns]  # Ensure correct order
         
-        # Convert categorical columns to numeric
-        for col in X.select_dtypes(include=['category', 'object']).columns:
-            X[col] = pd.Categorical(X[col]).codes.astype(np.float32)
+        # Track missing values BEFORE filling
+        missing_mask = X.isna()
         
-        # Fill missing values
-        X = X.fillna(0)
+        # Convert categorical columns to ordinal encoding
+        # This matches the ordinal encoding used in FeatureAugmenter
+        for col in X.select_dtypes(include=['category', 'object']).columns:
+            # Handle NaN in categorical: assign -1 then convert to indicator
+            codes = pd.Categorical(X[col]).codes.astype(np.float32)
+            codes[codes == -1] = np.nan  # Mark as missing
+            X[col] = codes
+        
+        # Update missing mask after categorical conversion
+        missing_mask = missing_mask | X.isna()
+        
+        # Fill missing values with indicator (matches training augmentation)
+        X = X.fillna(self.MISSING_INDICATOR)
         
         return X.astype(np.float32).values
     
@@ -239,6 +263,192 @@ class OpenTabWrapper(AbstractExecModel):
     def get_minimum_resources(self, is_gpu_available: bool = False) -> Dict[str, int]:
         """Return minimum required resources."""
         return {'num_cpus': 1, 'num_gpus': 1 if is_gpu_available else 0}
+    
+    def cleanup(self):
+        """Release resources after evaluation. Called by TabArena after each task."""
+        import gc
+        self._model = None
+        self._feature_columns = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+
+class OpenTabRegressionWrapper(AbstractExecModel):
+    """
+    TabArena-compatible wrapper for OpenTab (Regression).
+    
+    This wrapper inherits from AbstractExecModel to be compatible with
+    TabArena's Experiment class for benchmarking.
+    
+    Supports regression tasks only.
+    For classification, use OpenTabWrapper.
+    
+    Note: Following TabPFN, classification and regression are separate models.
+    This wrapper is for regression only.
+    """
+    
+    # Maximum training samples to use (TabPFN-style limit)
+    MAX_TRAIN_SAMPLES = 512
+    MAX_FEATURES = 32
+    MAX_TEST_BATCH = 256
+    
+    # Special value used to indicate missing during training
+    MISSING_INDICATOR = -999.0
+    
+    def __init__(self, checkpoint_path: Optional[str] = None, **kwargs):
+        super().__init__(**kwargs)
+        self.checkpoint_path = checkpoint_path or _GLOBAL_CHECKPOINT_PATH
+        self._model = None
+        self._device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self._feature_columns = None
+    
+    def _fit(self, X: pd.DataFrame, y: pd.Series, X_val=None, y_val=None, 
+             num_cpus=1, num_gpus=0, time_limit=None, **kwargs):
+        """Fit the OpenTab regression model on training data."""
+        # Set device based on available resources
+        self._device = 'cuda' if num_gpus > 0 and torch.cuda.is_available() else 'cpu'
+        
+        # Limit number of features first
+        if X.shape[1] > self.MAX_FEATURES:
+            self._feature_columns = X.columns[:self.MAX_FEATURES].tolist()
+            X = X[self._feature_columns]
+        else:
+            self._feature_columns = X.columns.tolist()
+        
+        # Subsample if dataset is too large
+        if len(X) > self.MAX_TRAIN_SAMPLES:
+            from sklearn.model_selection import train_test_split
+            try:
+                _, X, _, y = train_test_split(
+                    X, y, 
+                    test_size=self.MAX_TRAIN_SAMPLES / len(X),
+                    random_state=42
+                )
+            except ValueError:
+                idx = np.random.RandomState(42).choice(len(X), self.MAX_TRAIN_SAMPLES, replace=False)
+                X = X.iloc[idx]
+                y = y.iloc[idx]
+        
+        # Preprocess data
+        X_processed = self._preprocess_X(X)
+        
+        # Load model from checkpoint if provided
+        if self.checkpoint_path and os.path.exists(self.checkpoint_path):
+            checkpoint = torch.load(self.checkpoint_path, map_location=self._device, weights_only=False)
+            config = checkpoint.get('config', {})
+            
+            model = OpenTabModel(
+                embedding_size=config.get('embedding_size', 96),
+                n_heads=config.get('n_heads', 4),
+                n_layers=config.get('n_layers', 3),
+                mlp_hidden_size=config.get('mlp_hidden', 192),
+                n_outputs=1,  # Regression has single output
+                dropout=config.get('dropout', 0.0),
+            )
+            model.load_state_dict(checkpoint['model_state'])
+            self._model = OpenTabRegressor(model=model, device=self._device)
+        else:
+            # Create a new model with default architecture
+            model = OpenTabModel(
+                n_outputs=1,
+                embedding_size=96,
+                n_heads=4,
+                n_layers=3,
+            )
+            self._model = OpenTabRegressor(model=model, device=self._device)
+        
+        # Fit (store training data for in-context learning)
+        self._model.fit(X_processed, y.values)
+        
+        return self
+    
+    def _preprocess_X(self, X: pd.DataFrame) -> np.ndarray:
+        """
+        Preprocess features for OpenTab following TabPFN conventions.
+        
+        Handles:
+        1. Categorical features: ordinal encoding
+        2. Missing values: replaced with special indicator value
+        3. Feature subsetting: only use features seen during training
+        """
+        X = X.copy()
+        
+        # Limit features if we did so during training
+        if self._feature_columns is not None:
+            available_cols = [c for c in self._feature_columns if c in X.columns]
+            missing_cols = [c for c in self._feature_columns if c not in X.columns]
+            X = X[available_cols]
+            for col in missing_cols:
+                X[col] = self.MISSING_INDICATOR
+            X = X[self._feature_columns]
+        
+        # Track missing values BEFORE filling
+        missing_mask = X.isna()
+        
+        # Convert categorical columns to ordinal encoding
+        for col in X.select_dtypes(include=['category', 'object']).columns:
+            codes = pd.Categorical(X[col]).codes.astype(np.float32)
+            codes[codes == -1] = np.nan
+            X[col] = codes
+        
+        # Update missing mask after categorical conversion
+        missing_mask = missing_mask | X.isna()
+        
+        # Fill missing values with indicator
+        X = X.fillna(self.MISSING_INDICATOR)
+        
+        return X.astype(np.float32).values
+    
+    def _predict(self, X: pd.DataFrame) -> pd.Series:
+        """Predict regression values."""
+        X_processed = self._preprocess_X(X)
+        
+        # Use batching for large test sets
+        BATCH_SIZE = 64
+        
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        if len(X_processed) <= BATCH_SIZE:
+            y_pred = self._model.predict(X_processed)
+        else:
+            all_preds = []
+            for i in range(0, len(X_processed), BATCH_SIZE):
+                batch = X_processed[i:i + BATCH_SIZE]
+                batch_pred = self._model.predict(batch)
+                all_preds.append(batch_pred)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            y_pred = np.concatenate(all_preds)
+        
+        return pd.Series(y_pred, index=X.index)
+    
+    def _predict_proba(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Regression does not support predict_proba."""
+        raise NotImplementedError("Regression tasks do not support predict_proba. Use _predict instead.")
+    
+    @classmethod
+    def supported_problem_types(cls) -> List[str]:
+        """Return supported problem types."""
+        return ['regression']
+    
+    def _get_default_resources(self) -> Tuple[int, int]:
+        """Return default CPU/GPU resources."""
+        return (1, 1)
+    
+    def get_minimum_resources(self, is_gpu_available: bool = False) -> Dict[str, int]:
+        """Return minimum required resources."""
+        return {'num_cpus': 1, 'num_gpus': 1 if is_gpu_available else 0}
+    
+    def cleanup(self):
+        """Release resources after evaluation."""
+        import gc
+        self._model = None
+        self._feature_columns = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 def get_tabarena_configs(checkpoint_path: str, num_configs: int = 1) -> List[Dict[str, Any]]:

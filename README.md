@@ -81,8 +81,60 @@ Inference:  clf.fit(X_train, y_train) → clf.predict(X_test)  # One forward pas
 model.py          # Transformer architecture + OpenTabClassifier/Regressor
 generate_data.py  # Synthetic data generation (classification & regression priors)
 train.py          # Training loop with task-specific evaluation
-evaluate.py       # TabArena benchmark + quick evaluation
+evaluate.py       # TabArena benchmark + quick evaluation + TabArena wrappers
 ```
+
+## TabArena Benchmark Integration
+
+OpenTab includes full [TabArena](https://github.com/autogluon/tabarena) compatibility for standardized benchmarking against state-of-the-art tabular ML methods.
+
+### Installation
+
+```bash
+pip install tabarena autogluon openml
+```
+
+### Evaluation Modes
+
+| Mode | Description | Command |
+|------|-------------|---------|
+| `quick` | Test on sklearn classification datasets | `python evaluate.py --mode quick` |
+| `quick-regression` | Test on sklearn regression datasets | `python evaluate.py --mode quick-regression` |
+| `lite` | TabArena-Lite (51 datasets, 1 fold) | `python evaluate.py --mode lite` |
+| `full` | Full TabArena (all datasets, all folds) | `python evaluate.py --mode full` |
+
+### TabArena Wrappers
+
+Two wrapper classes implement the `AbstractExecModel` interface for TabArena compatibility:
+
+```python
+from evaluate import OpenTabWrapper, OpenTabRegressionWrapper
+
+# Classification (binary/multiclass)
+clf = OpenTabWrapper(problem_type='multiclass', eval_metric=metric)
+clf._fit(X_train, y_train)
+predictions = clf._predict(X_test)
+probabilities = clf._predict_proba(X_test)
+clf.cleanup()  # Release GPU memory
+
+# Regression
+reg = OpenTabRegressionWrapper(problem_type='regression', eval_metric=metric)
+reg._fit(X_train, y_train)
+predictions = reg._predict(X_test)
+reg.cleanup()
+```
+
+### Wrapper Features
+
+| Feature | OpenTabWrapper | OpenTabRegressionWrapper |
+|---------|----------------|--------------------------|
+| Problem types | `binary`, `multiclass` | `regression` |
+| `_fit()` with resources | ✅ `num_cpus`, `num_gpus`, `time_limit` | ✅ |
+| `_predict()` | ✅ Returns `pd.Series` | ✅ Returns `pd.Series` |
+| `_predict_proba()` | ✅ Returns `pd.DataFrame` | ❌ (raises `NotImplementedError`) |
+| `cleanup()` | ✅ Releases GPU memory | ✅ |
+| Batched inference | ✅ (64 samples/batch) | ✅ |
+| Auto subsampling | ✅ (512 train samples max) | ✅ |
 
 ## Key Commands
 
@@ -90,11 +142,13 @@ evaluate.py       # TabArena benchmark + quick evaluation
 |------|---------|
 | Generate classification data | `python generate_data.py --prior mixed --n_datasets 100000 --output data/clf.h5` |
 | Generate regression data | `python generate_data.py --prior mixed_regression --n_datasets 100000 --output data/reg.h5` |
+| Generate with augmentation | `python generate_data.py --prior augmented_mixed --n_datasets 100000` |
 | Train classification | `python train.py --online --task classification --epochs 100` |
 | Train regression | `python train.py --online --task regression --epochs 100` |
 | Quick eval (classification) | `python evaluate.py --checkpoint model.pt --mode quick` |
 | Quick eval (regression) | `python evaluate.py --checkpoint model.pt --mode quick-regression` |
-| TabArena eval | `python evaluate.py --checkpoint model.pt --mode lite` |
+| TabArena-Lite | `python evaluate.py --checkpoint model.pt --mode lite` |
+| TabArena-Full | `python evaluate.py --checkpoint model.pt --mode full` |
 
 ## Configuration
 
@@ -103,6 +157,7 @@ evaluate.py       # TabArena benchmark + quick evaluation
 - `--max_samples`: Max samples per dataset (default: 100)
 - `--max_features`: Max features (default: 20)
 - `--prior`: Prior type - `mlp`, `gp`, `scm`, `tree`, `mixed` for classification; `mlp_regression`, `gp_regression`, `linear_regression`, `mixed_regression` for regression
+- **Augmented priors**: Use `augmented_*` prefix (e.g., `augmented_mixed`) to add categorical features and missing values
 
 **Training:**
 - `--task`: Task type - `classification` or `regression`
@@ -116,6 +171,47 @@ evaluate.py       # TabArena benchmark + quick evaluation
 - `--mode quick-regression`: Test regression on sklearn datasets (Diabetes, California Housing)
 - `--mode lite`: TabArena-Lite (51 classification datasets, 1 fold)
 - `--mode full`: Full TabArena (all folds)
+
+## Handling Categorical Features and Missing Values
+
+Following the [TabPFN Nature paper](https://www.nature.com/articles/s41586-024-08328-6), OpenTab handles real-world data challenges through **training-time augmentation**:
+
+### Categorical Features
+- **During training**: Random features are converted to categorical via percentile binning
+- **During inference**: Categorical columns are ordinal-encoded (matching the training format)
+- Controlled by `categorical_prob` parameter (default: 0.3 = 30% of features)
+
+### Missing Values
+- **During training**: Random values are masked with a special indicator (-999.0)
+- **Four missingness patterns** (matching real-world scenarios):
+  - `random`: Completely random missingness
+  - `column`: Some columns have high missingness rates
+  - `row`: Some rows have many missing values
+  - `block`: Correlated block missingness
+- **Model learns**: Dedicated `missing_embedding` and `missing_indicator_embedding` parameters
+- Controlled by `missing_prob` parameter (default: 0.1 = 10% of values)
+
+### Usage
+
+```python
+from generate_data import get_prior
+
+# Standard prior (no augmentation)
+prior = get_prior('mixed')
+
+# Augmented prior with categorical features and missing values
+prior = get_prior('augmented_mixed', 
+                  categorical_prob=0.3,  # 30% of features become categorical
+                  missing_prob=0.1,      # 10% of values are missing
+                  augment_prob=0.7)      # Apply augmentation 70% of the time
+
+# Generate training data
+dataset = prior.generate(n_samples=100, n_features=10, n_classes=3)
+
+# Metadata available
+print(f"Categorical features: {dataset.categorical_mask}")
+print(f"Missing values: {dataset.missing_mask.sum()}")
+```
 
 ## References
 

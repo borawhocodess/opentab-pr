@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opentab"
+version = "0.1.0"
+description = "A minimal, educational implementation of TabPFN (Tabular Prior-Data Fitted Network)"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.11"
+authors = [
+    {name = "opentab Contributors"}
+]
+keywords = [
+    "machine-learning",
+    "deep-learning",
+    "tabular-data",
+    "transformers",
+    "in-context-learning",
+    "bayesian",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.21.0",
+    "h5py>=3.7.0",
+    "tqdm>=4.60.0",
+    "scikit-learn>=1.0.0",
+    "matplotlib>=3.10.1",
+    "pandas>=2.3.3",
+    "autogluon>=1.5.0",
+    "openml>=0.15.1",
+    "schedulefree>=1.4.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "jupyter>=1.0.0",
+    "ipykernel>=6.0.0",
+    "matplotlib>=3.5.0",
+    "pytest>=7.0.0",
+]
+training = [
+    "schedulefree>=1.0.0",
+    "wandb>=0.15.0",
+]
+benchmark = [
+    "openml>=0.14.0",
+    "autogluon>=1.0.0",
+    "tabarena @ git+https://github.com/autogluon/tabarena.git#subdirectory=tabarena",
+    "pandas>=1.5.0",
+]
+
+[project.scripts]
+opentab-generate = "generate_data:main"
+opentab-train = "train:main"
+opentab-evaluate = "evaluate:main"
+
+[project.urls]
+Repository = "https://github.com/snedelkoski/opentab"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]  # Line too long
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311"]

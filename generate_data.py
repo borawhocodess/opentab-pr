@@ -1383,9 +1383,7 @@ def main():
     parser.add_argument('--max_classes', type=int, default=10,
                        help='Maximum number of classes')
     parser.add_argument('--prior', type=str, default='mixed',
-                       choices=['mlp', 'gp', 'tree', 'scm', 'mixed',
-                                'mlp_regression', 'gp_regression', 'linear_regression', 'mixed_regression'],
-                       help='Prior type to use (use *_regression for regression data)')
+                       help='Prior type to use (base: mlp, gp, tree, scm, mixed; augmented: augmented_*; regression: *_regression)')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
     parser.add_argument('--visualize', action='store_true',

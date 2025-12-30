@@ -473,7 +473,7 @@ class Trainer:
                     f"Step {self.global_step}/{total_steps} | "
                     f"Loss: {avg_loss:.4f} | "
                     f"LR: {lr:.2e} | "
-                    f"Speed: {steps_per_sec:.1f} steps/s"
+                    f"Speed: {steps_per_sec:.2f} steps/s"
                 )
                 print(log_msg)
                 
@@ -867,9 +867,9 @@ def main():
                        help='Number of training steps (overrides epochs)')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--grad_accumulation', type=int, default=8)
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--weight_decay', type=float, default=0.01)
-    parser.add_argument('--warmup_steps', type=int, default=1000)
+    parser.add_argument('--warmup_steps', type=int, default=500)
     parser.add_argument('--max_grad_norm', type=float, default=1.0)
     
     # Optimization arguments

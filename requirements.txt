@@ -24,3 +24,7 @@ ipykernel>=6.0.0
 # openml>=0.14.0
 # autogluon>=1.0.0
 # tabarena @ git+https://github.com/autogluon/tabarena.git#subdirectory=tabarena
+
+# TabArena Leaderboard & ELO Computation (recommended approach)
+# Uncomment to enable leaderboard generation with ELO ratings:
+# git+https://github.com/autogluon/tabarena.git#subdirectory=bencheval

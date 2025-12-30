@@ -30,18 +30,15 @@ python evaluate.py --checkpoint checkpoints/regressor.pt --mode quick-regression
 source .venv/bin/activate && python evaluate.py --checkpoint checkpoints/classifier.pt --mode lite
 ```
 
-## Two-Model Approach (Like TabPFN)
+## Two-Model Approach
 
 Following [TabPFN](https://github.com/PriorLabs/TabPFN), OpenTab trains **separate models** for classification and regression:
 
 | Task | Prior Type | Model Class | Checkpoint |
 |------|------------|-------------|------------|
-| Classification | `mixed` (MLP, GP, Tree, SCM) | `OpenTabClassifier` | `classifier.pt` |
-| Regression | `mixed_regression` (MLP, GP, Linear) | `OpenTabRegressor` | `regressor.pt` |
+| Classification | `augmented_mixed` (MLP, GP, Tree, SCM) | `OpenTabClassifier` | `classifier.pt` |
+| Regression | `augmented_mixed_regression` (MLP, GP, Linear) | `OpenTabRegressor` | `regressor.pt` |
 
-This matches how TabPFN provides separate pre-trained weights:
-- `tabpfn-v2.5-classifier-*.ckpt` for classification
-- `tabpfn-v2.5-regressor-*.ckpt` for regression
 
 ## Use as a Classifier
 
@@ -91,25 +88,43 @@ OpenTab includes full [TabArena](https://github.com/autogluon/tabarena) compatib
 ### Installation
 
 ```bash
+# Basic TabArena installation
 pip install tabarena autogluon openml
+
+# Or full TabArena installation (recommended)
+git clone https://github.com/autogluon/tabarena.git
+cd tabarena
+uv pip install --prerelease=allow -e ./tabarena[benchmark]
 ```
 
 ### Evaluation Modes
 
 | Mode | Description | Command |
 |------|-------------|---------|
-
-## Contributing
-
-We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to submit pull requests, report issues, and contribute to the project.
-
-## License
-
-This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.
 | `quick` | Test on sklearn classification datasets | `python evaluate.py --mode quick` |
 | `quick-regression` | Test on sklearn regression datasets | `python evaluate.py --mode quick-regression` |
 | `lite` | TabArena-Lite (51 datasets, 1 fold) | `python evaluate.py --mode lite` |
 | `full` | Full TabArena (all datasets, all folds) | `python evaluate.py --mode full` |
+| `leaderboard` | Generate leaderboard with ELO ratings | `python evaluate.py --mode leaderboard --results eval_results` |
+| `leaderboard-cache` | Load leaderboard from cache | `python evaluate.py --mode leaderboard-cache --method OpenTab` |
+
+### Complete Evaluation Workflow
+
+```bash
+# Step 1: Run TabArena-Lite evaluation (51 datasets, 1 fold each)
+source .venv/bin/activate
+python evaluate.py --checkpoint checkpoints/classifier.pt --mode lite
+
+# Step 2: Generate leaderboard comparing against all TabArena baselines
+python evaluate.py --mode leaderboard --results eval_results --method OpenTab
+```
+
+This generates:
+- **ELO ratings** with 95% confidence intervals
+- **Win rates** against all methods
+- **Average ranks** across datasets
+- **Improvability scores**
+- **Comparison figures** saved to `eval_results/leaderboard/`
 
 ### TabArena Wrappers
 
@@ -157,6 +172,7 @@ reg.cleanup()
 | Quick eval (regression) | `python evaluate.py --checkpoint model.pt --mode quick-regression` |
 | TabArena-Lite | `python evaluate.py --checkpoint model.pt --mode lite` |
 | TabArena-Full | `python evaluate.py --checkpoint model.pt --mode full` |
+| Generate Leaderboard | `python evaluate.py --mode leaderboard --results eval_results` |
 
 ## Configuration
 
@@ -230,8 +246,21 @@ print(f"Missing values: {dataset.missing_mask.sum()}")
   booktitle={ICLR 2023},
   year={2023}
 }
+
+@article{erickson2025tabarena,
+  title={TabArena: A Living Benchmark for Machine Learning on Tabular Data}, 
+  author={Nick Erickson and Lennart Purucker and Andrej Tschalzev and David Holzmüller and
+          Prateek Mutalik Desai and David Salinas and Frank Hutter},
+  year={2025},
+  journal={arXiv preprint arXiv:2506.16791},
+  url={https://arxiv.org/abs/2506.16791}, 
+}
 ```
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for details on how to submit pull requests, report issues, and contribute to the project.
 
 ## License
 
-Apache 2.0
+This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENSE) file for details.

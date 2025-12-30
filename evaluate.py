@@ -623,7 +623,7 @@ def run_quick_evaluation(
     
     # Load model
     if checkpoint_path and os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         config = checkpoint.get('config', {})
         
         model = OpenTabModel(
@@ -1081,7 +1081,7 @@ def run_on_custom_datasets(
     
     # Load model
     if checkpoint_path and os.path.exists(checkpoint_path):
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
         config = checkpoint.get('config', {})
         model = OpenTabModel(
             embedding_size=config.get('embedding_size', 96),

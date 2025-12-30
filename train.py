@@ -26,6 +26,7 @@ import math
 import os
 import random
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, Dict, Any, Iterator, Tuple
@@ -115,6 +116,7 @@ class TrainConfig:
     seed: int = 42
     device: str = 'auto'
     num_workers: int = 0
+    compile_model: bool = False  # torch.compile (disabled by default due to dynamic train_size)
     
     def __post_init__(self):
         if self.device == 'auto':
@@ -226,7 +228,7 @@ class Trainer:
     def __init__(self, config: TrainConfig):
         self.config = config
         self.device = torch.device(config.device)
-        
+        self.device_type = 'cuda' if 'cuda' in str(self.device) else 'cpu'
         # Set seeds
         random.seed(config.seed)
         np.random.seed(config.seed)
@@ -340,6 +342,9 @@ class Trainer:
         train_size = batch['train_size']
         n_samples = batch['n_samples']
         
+        # Use bfloat16 autocast for faster training on CUDA
+        autocast_ctx = torch.amp.autocast(device_type=self.device_type, dtype=torch.bfloat16) if self.device_type == "cuda" else nullcontext()
+        
         # Process each batch item individually since train_size varies
         batch_size = X.shape[0]
         losses = []
@@ -357,8 +362,9 @@ class Trainer:
                 if torch.isnan(X_i).any() or torch.isinf(X_i).any():
                     continue
                 
-                # Forward pass for this sample
-                logits = self.model(X_i, y_train_i, ts)  # (1, n_test, classes)
+                # Forward pass for this sample with autocast
+                with autocast_ctx:
+                    logits = self.model(X_i, y_train_i, ts)  # (1, n_test, classes)
                 
                 # Skip if model output is NaN
                 if torch.isnan(logits).any():
@@ -512,6 +518,9 @@ class Trainer:
         total_correct = 0
         total_samples = 0
         
+        # Use bfloat16 autocast for faster inference on CUDA
+        autocast_ctx = torch.amp.autocast(device_type=self.device_type, dtype=torch.bfloat16) if self.device_type == "cuda" else nullcontext()
+        
         with torch.no_grad():
             for batch in eval_loader:
                 X = batch['X'].to(self.device)
@@ -533,7 +542,8 @@ class Trainer:
                         if torch.isnan(X_i).any() or torch.isinf(X_i).any():
                             continue
                         
-                        logits = self.model(X_i, y_train_i, ts)
+                        with autocast_ctx:
+                            logits = self.model(X_i, y_train_i, ts)
                         
                         # Skip if model output is NaN
                         if torch.isnan(logits).any():
@@ -589,6 +599,9 @@ class Trainer:
             total_acc = 0.0
             n_classification = 0
             
+            # Use bfloat16 autocast for faster inference on CUDA
+            autocast_ctx = torch.amp.autocast(device_type=self.device_type, dtype=torch.bfloat16) if self.device_type == "cuda" else nullcontext()
+            
             with torch.no_grad():
                 for name, data in classification_datasets:
                     X, y = data.data, data.target
@@ -627,7 +640,8 @@ class Trainer:
                     y_train_tensor = torch.tensor(y_all[:, :n_train], device=self.device)
                     
                     # Predict - pass only train labels and train_size as int
-                    logits = self.model(X_tensor, y_train_tensor, n_train)
+                    with autocast_ctx:
+                        logits = self.model(X_tensor, y_train_tensor, n_train)
                     
                     # Get predictions on test set
                     test_logits = logits[0, :n_test, :n_classes]
@@ -670,6 +684,9 @@ class Trainer:
             
             total_r2 = 0.0
             n_regression = 0
+            
+            # Use bfloat16 autocast for faster inference on CUDA
+            autocast_ctx = torch.amp.autocast(device_type=self.device_type, dtype=torch.bfloat16) if self.device_type == "cuda" else nullcontext()
             
             with torch.no_grad():
                 for name, data in regression_datasets:
@@ -720,7 +737,8 @@ class Trainer:
                     y_train_tensor = torch.tensor(y_all[:, :n_train], device=self.device)
                     
                     # Predict
-                    logits = self.model(X_tensor, y_train_tensor, n_train)
+                    with autocast_ctx:
+                        logits = self.model(X_tensor, y_train_tensor, n_train)
                     
                     # Get predictions - use expected value over bin probabilities
                     test_logits = logits[0, :n_test, :n_bins]
@@ -843,7 +861,7 @@ def main():
     parser.add_argument('--steps', type=int, default=None,
                        help='Number of training steps (overrides epochs)')
     parser.add_argument('--batch_size', type=int, default=32)
-    parser.add_argument('--grad_accumulation', type=int, default=4)
+    parser.add_argument('--grad_accumulation', type=int, default=8)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=0.01)
     parser.add_argument('--warmup_steps', type=int, default=1000)

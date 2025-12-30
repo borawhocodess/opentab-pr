@@ -90,8 +90,6 @@ class TrainConfig:
     max_features: int = 20
     max_samples: int = 100
     max_classes: int = 10
-    use_feature_pos_emb: bool = True  # Feature positional embeddings (TabPFN "subspace" style)
-    features_per_group: int = 2  # Group features before attention (TabPFN uses 2). Set to 1 to disable.
     
     # Training
     n_epochs: int = 100
@@ -246,9 +244,6 @@ class Trainer:
             mlp_hidden_size=config.mlp_hidden,
             n_outputs=config.max_classes,
             dropout=config.dropout,
-            use_feature_pos_emb=config.use_feature_pos_emb,
-            max_features=config.max_features,
-            features_per_group=config.features_per_group,
         ).to(self.device)
         
         # Create optimizer
@@ -473,7 +468,7 @@ class Trainer:
                     f"Step {self.global_step}/{total_steps} | "
                     f"Loss: {avg_loss:.4f} | "
                     f"LR: {lr:.2e} | "
-                    f"Speed: {steps_per_sec:.2f} steps/s"
+                    f"Speed: {steps_per_sec:.1f} steps/s"
                 )
                 print(log_msg)
                 
@@ -867,9 +862,9 @@ def main():
                        help='Number of training steps (overrides epochs)')
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--grad_accumulation', type=int, default=8)
-    parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--weight_decay', type=float, default=0.01)
-    parser.add_argument('--warmup_steps', type=int, default=500)
+    parser.add_argument('--warmup_steps', type=int, default=1000)
     parser.add_argument('--max_grad_norm', type=float, default=1.0)
     
     # Optimization arguments

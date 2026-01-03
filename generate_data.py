@@ -16,9 +16,8 @@ Reference:
 """
 
 import argparse
-import math
 import random
-from typing import Tuple, Optional, Dict, Any, Callable, List
+from typing import Tuple, Optional, Dict, Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -76,15 +75,21 @@ class SCMHyperparameters:
 
 
 def sample_hyperparameters(
-    n_samples_range: Tuple[int, int] = (10, 100),
-    n_features_range: Tuple[int, int] = (2, 20),
+    n_samples_range: Tuple[int, int] = (10, 512),
+    n_features_range: Tuple[int, int] = (1, 160),
     n_classes_range: Tuple[int, int] = (2, 10),
     node_dim_range: Tuple[int, int] = (4, 16),
     is_regression: bool = False,
+    max_cells: int = 75000,
 ) -> SCMHyperparameters:
     """
     Sample high-level hyperparameters for dataset generation.
     Following the paper, hyperparameters are sampled from specific distributions.
+    
+    Paper specifications:
+    - n_samples: uniform up to 2048 (we use configurable max, default 512)
+    - n_features: Beta(0.95, 8.0) scaled to [1, 160]
+    - max_cells: 75,000 (reduce samples if n_samples * n_features exceeds this)
     """
     # Graph size: log-uniform distribution
     n_nodes_min, n_nodes_max = 10, 50
@@ -102,8 +107,18 @@ def sample_hyperparameters(
     node_dim = random.randint(*node_dim_range)
     
     # Dataset properties
+    # Paper: n_samples uniform up to max
     n_samples = random.randint(*n_samples_range)
-    n_features = random.randint(*n_features_range)
+    
+    # Paper: n_features from Beta(k=0.95, b=8.0) scaled to [1, 160]
+    beta_sample = np.random.beta(0.95, 8.0)  # Sample in [0, 1]
+    n_features_min, n_features_max = n_features_range
+    n_features = int(beta_sample * (n_features_max - n_features_min) + n_features_min)
+    n_features = max(n_features_min, min(n_features_max, n_features))
+    
+    # Paper: Cap table size at 75,000 cells by reducing samples for large feature counts
+    if n_samples * n_features > max_cells:
+        n_samples = max(1, max_cells // n_features)
     n_classes = 0 if is_regression else random.randint(*n_classes_range)
     
     # Initialization type
@@ -122,7 +137,8 @@ def sample_hyperparameters(
     edge_noise_std = random.uniform(0.01, 0.3)
     
     # Post-processing probabilities
-    apply_kumaraswamy = random.random() < 0.3
+    # Paper: Kumaraswamy applied to "some datasets" - we use 20% of datasets, 50% of features within
+    apply_kumaraswamy = random.random() < 0.2
     kumaraswamy_a = random.uniform(0.5, 2.0) if apply_kumaraswamy else 1.0
     kumaraswamy_b = random.uniform(0.5, 2.0) if apply_kumaraswamy else 1.0
     quantization_prob = random.uniform(0.0, 0.5) if random.random() < 0.4 else 0.0
@@ -235,6 +251,7 @@ def sample_dag_with_subgraphs(
 # ============================================================================
 
 ACTIVATION_FUNCTIONS = {
+    # Paper: identity, logarithm, sigmoid, absolute, sine, tanh, rank, squaring, power, smooth ReLU, step, modulo
     'identity': lambda x: x,
     'relu': lambda x: np.maximum(0, x),
     'sigmoid': lambda x: 1 / (1 + np.exp(-np.clip(x, -500, 500))),
@@ -243,11 +260,14 @@ ACTIVATION_FUNCTIONS = {
     'abs': np.abs,
     'square': lambda x: x ** 2,
     'sqrt_abs': lambda x: np.sqrt(np.abs(x) + 1e-8),
-    'log_abs': lambda x: np.log(np.abs(x) + 1e-8),
+    'log': lambda x: np.log(np.abs(x) + 1e-8),  # logarithm from paper
     'step': lambda x: (x > 0).astype(float),
-    'softplus': lambda x: np.log1p(np.exp(np.clip(x, -20, 20))),
+    'softplus': lambda x: np.log1p(np.exp(np.clip(x, -20, 20))),  # smooth ReLU from paper
     'modulo': lambda x: np.mod(x, 1.0),
+    'power_2': lambda x: np.clip(x, -10, 10) ** 2,
     'power_3': lambda x: np.clip(x, -10, 10) ** 3,
+    'power_4': lambda x: np.clip(x, -10, 10) ** 4,
+    'power_5': lambda x: np.clip(x, -10, 10) ** 5,
     'rank': lambda x: np.argsort(np.argsort(x, axis=0), axis=0).astype(float) / (x.shape[0] - 1 + 1e-8),
 }
 
@@ -303,7 +323,7 @@ class DecisionTreeMapping:
     applying thresholds to determine the output.
     """
     
-    def __init__(self, input_dim: int, output_dim: int, max_depth: int = 3):
+    def __init__(self, input_dim: int, output_dim: int, max_depth: int = 4):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.tree = self._build_tree(max_depth, depth=0)
@@ -401,7 +421,8 @@ def sample_edge_mapping(input_dim: int, output_dim: int) -> Callable:
         n_layers = random.randint(1, 3)
         return NeuralNetworkMapping(input_dim, output_dim, n_hidden_layers=n_layers)
     elif mapping_type == 'decision_tree':
-        max_depth = random.randint(2, 5)
+        # Paper doesn't specify max depth, using up to 8 for more complex rule-based dependencies
+        max_depth = random.randint(2, 8)
         return DecisionTreeMapping(input_dim, output_dim, max_depth=max_depth)
     else:
         return CategoricalDiscretization(input_dim, output_dim)
@@ -436,13 +457,12 @@ def sample_initialization_data(
         data = np.random.randn(n_samples, n_dims) * init_scale
     elif init_type == 'uniform':
         data = np.random.uniform(-init_scale, init_scale, (n_samples, n_dims))
-    else:  # mixed
-        data = np.zeros((n_samples, n_dims))
-        for d in range(n_dims):
-            if random.random() < 0.5:
-                data[:, d] = np.random.randn(n_samples) * init_scale
-            else:
-                data[:, d] = np.random.uniform(-init_scale, init_scale, n_samples)
+    else:  # mixed - Paper: "for each root node, we randomly select either normal or uniform"
+        # Since this function is called per root node, we select one distribution for all dims
+        if random.random() < 0.5:
+            data = np.random.randn(n_samples, n_dims) * init_scale
+        else:
+            data = np.random.uniform(-init_scale, init_scale, (n_samples, n_dims))
     
     # Apply prototype-based non-independence if specified
     if prototype_fraction > 0:
@@ -499,9 +519,10 @@ def quantize_feature(x: np.ndarray, n_bins: int = None) -> np.ndarray:
     Quantize a continuous feature into discrete buckets.
     
     Mimics binned/discretized features common in real datasets.
+    Paper: K categories with minimum 2 classes.
     """
     if n_bins is None:
-        n_bins = random.randint(3, 20)
+        n_bins = random.randint(2, 20)  # Paper: minimum 2 categories
     
     # Sample bin edges from the feature values
     unique_vals = np.unique(x)
@@ -518,13 +539,14 @@ def quantize_feature(x: np.ndarray, n_bins: int = None) -> np.ndarray:
 def add_missing_values(
     X: np.ndarray,
     missing_prob: float,
-    missing_value: float = np.nan,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Introduce missing values using Missing Completely At Random (MCAR).
     
     Each value is masked as missing with probability ρ_miss,
     independently of the data values.
+    
+    Missing values are filled with NaN (float('nan')) to be handled by the model.
     """
     missing_mask = np.random.rand(*X.shape) < missing_prob
     
@@ -538,7 +560,7 @@ def add_missing_values(
             missing_mask[keep_idx, j] = False
     
     X_with_missing = X.copy()
-    X_with_missing[missing_mask] = missing_value
+    X_with_missing[missing_mask] = float('nan')  # Use NaN for missing values
     
     return X_with_missing, missing_mask
 
@@ -560,7 +582,7 @@ def apply_post_processing(
     missing_mask = np.zeros((n_samples, n_features), dtype=bool)
     
     for j in range(n_features):
-        # Kumaraswamy warping
+        # Kumaraswamy warping - Paper: applied to some datasets (20%), 50% of features within those
         if hp.apply_kumaraswamy and random.random() < 0.5:
             X[:, j] = kumaraswamy_transform(X[:, j], hp.kumaraswamy_a, hp.kumaraswamy_b)
         
@@ -571,7 +593,7 @@ def apply_post_processing(
     
     # Missing values (applied to all features together)
     if hp.missing_prob > 0:
-        X, missing_mask = add_missing_values(X, hp.missing_prob, missing_value=0.0)
+        X, missing_mask = add_missing_values(X, hp.missing_prob)
     
     return X, categorical_mask, missing_mask
 
@@ -747,14 +769,21 @@ class SCMDataGenerator:
             features.append(np.random.randn(hp.n_samples))
         
         X = np.stack(features[:hp.n_features], axis=1)
-        y = target_values.astype(np.int64 if not self.is_regression else np.float32)
         
-        # Step 6: Apply post-processing
+        # Paper: For regression, target should be a continuous feature WITHOUT post-processing
+        # We extract the target before applying post-processing
+        if self.is_regression:
+            # Use target_values directly (continuous, no post-processing)
+            y = target_values.astype(np.float32)
+        else:
+            y = target_values.astype(np.int64)
+        
+        # Step 6: Apply post-processing to features (NOT to regression target)
         X, categorical_mask, missing_mask = apply_post_processing(X, hp)
         
-        # Handle NaN/Inf
-        X = np.nan_to_num(X, nan=0.0, posinf=1e6, neginf=-1e6)
-        X = np.clip(X, -1e6, 1e6)
+        # Handle Inf values but preserve NaN for missing values (model handles NaN)
+        X = np.where(np.isinf(X), np.sign(X) * 1e6, X)
+        X = np.clip(np.where(np.isnan(X), X, np.clip(X, -1e6, 1e6)), -1e6, 1e6)
         
         # Compute train size
         train_size = max(1, int(hp.n_samples * train_ratio))
@@ -989,10 +1018,10 @@ def main():
                        help='Number of datasets to generate')
     parser.add_argument('--batch_size', type=int, default=1000,
                        help='Batch size for generation')
-    parser.add_argument('--max_samples', type=int, default=100,
-                       help='Maximum samples per dataset')
-    parser.add_argument('--max_features', type=int, default=20,
-                       help='Maximum features per dataset')
+    parser.add_argument('--max_samples', type=int, default=512,
+                       help='Maximum samples per dataset (paper uses up to 2048)')
+    parser.add_argument('--max_features', type=int, default=160,
+                       help='Maximum features per dataset (paper uses Beta distribution scaled to 1-160)')
     parser.add_argument('--max_classes', type=int, default=10,
                        help='Maximum number of classes')
     parser.add_argument('--regression', action='store_true',
@@ -1017,8 +1046,8 @@ def main():
     os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
     
     generator = SyntheticDatasetGenerator(
-        n_samples_range=(10, args.max_samples),
-        n_features_range=(2, args.max_features),
+        n_samples_range=(1, args.max_samples),
+        n_features_range=(1, args.max_features),
         n_classes_range=(2, args.max_classes),
         is_regression=args.regression,
     )
@@ -1034,4 +1063,52 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    import sys
+    
+    # If no arguments provided, run tests
+    if len(sys.argv) == 1:
+        print("Testing SyntheticDatasetGenerator...")
+        
+        # Set seeds for reproducibility
+        random.seed(42)
+        np.random.seed(42)
+        
+        # Create generator
+        generator = SyntheticDatasetGenerator(
+            n_samples_range=(20, 50),
+            n_features_range=(5, 10),
+            n_classes_range=(2, 5),
+        )
+        
+        # Test hyperparameter sampling
+        params = sample_hyperparameters(
+            n_samples_range=(20, 50),
+            n_features_range=(5, 10),
+            n_classes_range=(2, 5),
+        )
+        print(f"Sampled hyperparameters: n_nodes={params.n_nodes}, n_features={params.n_features}, "
+              f"n_samples={params.n_samples}, n_classes={params.n_classes}")
+        
+        # Test single dataset generation (using internal SCMDataGenerator)
+        print("\nGenerating single dataset...")
+        dataset = generator.generator.generate()
+        print(f"  X shape: {dataset.X.shape}")
+        print(f"  y shape: {dataset.y.shape}")
+        print(f"  train_size: {dataset.train_size}")
+        print(f"  n_classes: {dataset.n_classes}")
+        print(f"  y unique values: {np.unique(dataset.y)}")
+        
+        # Test batch generation
+        print("\nGenerating batch of 5 datasets...")
+        batch = generator.generate_batch(5, max_samples=50, max_features=10, max_classes=5)
+        print(f"  X batch shape: {batch['X'].shape}")
+        print(f"  y batch shape: {batch['y'].shape}")
+        print(f"  train_sizes: {batch['train_size']}")
+        print(f"  n_classes: {batch['n_features']}")
+        # Verify data is valid
+        assert not np.isnan(batch['X']).all(), "X contains all NaN values"
+        assert batch['X'].shape[0] == 5, "Batch size mismatch"
+        
+        print("\n✓ Data generation test passed!")
+    else:
+        main()

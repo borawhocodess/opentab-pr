@@ -114,13 +114,15 @@ python train.py --online --resume checkpoints/model_50000.pt
 
 ## Data Generation
 
-Synthetic data is generated using **Structural Causal Models (SCMs)** following the TabPFN paper:
+Synthetic data is generated using **Structural Causal Models (SCMs)** following the TabPFN v2 Nature paper:
 
-- **DAG Structure**: Growing network with redirection for acyclicity
+- **DAG Structure**: Growing network with redirection (preferential attachment for scale-free networks)
 - **Node Representations**: Vector embeddings in ℝᵈ
-- **Edge Functions**: Neural networks, decision trees, or categorical mappings
-- **Target Generation**: Warping via Kumaraswamy distribution
-- **Missing Values**: MCAR (Missing Completely at Random) augmentation
+- **Edge Functions**: Neural networks (with various activations), decision trees, or categorical mappings
+- **Activations**: identity, log, sigmoid, abs, sin, tanh, rank, square, power (2-5), smooth ReLU, step, modulo
+- **Post-processing**: Kumaraswamy warping (20% of datasets), quantization, missing values (MCAR with NaN)
+- **Feature Sampling**: Beta(0.95, 8.0) distribution scaled to [1, 160] features (paper-aligned)
+- **Cell Budget**: Tables capped at 75,000 cells (samples reduced for high feature counts)
 
 ```bash
 # Generate and save synthetic datasets to HDF5
@@ -139,8 +141,8 @@ python generate_data.py --n_datasets 100000 --regression --output data/synthetic
 |-----------|---------|-------------|
 | `--n_datasets` | 100000 | Number of datasets to generate |
 | `--output` | data/synthetic.h5 | Output HDF5 file path |
-| `--max_samples` | 100 | Maximum samples per dataset |
-| `--max_features` | 20 | Maximum features per dataset |
+| `--max_samples` | 512 | Maximum samples per dataset (paper uses up to 2048) |
+| `--max_features` | 160 | Maximum features per dataset (Beta distribution, paper-aligned) |
 | `--max_classes` | 10 | Maximum classes (classification) |
 | `--regression` | False | Generate regression data |
 | `--visualize` | False | Show visualization of generated data |

@@ -39,8 +39,6 @@ python evaluate.py --mode leaderboard --results eval_results --method OpenTab
 
 ## How It Works
 
-TabPFN learns to **approximate Bayesian inference** on tabular data. It's trained on millions of synthetic datasets generated from Structural Causal Models (SCMs), then at inference time performs **in-context learning** - a single forward pass, no gradient updates.
-
 ```
 Training:   Generate SCM-based data → Train Transformer → Save checkpoint
 Inference:  clf.fit(X_train, y_train) → clf.predict(X_test)  # One forward pass!
@@ -76,9 +74,46 @@ train.py          # Training loop with online data generation
 evaluate.py       # TabArena benchmark + quick evaluation
 ```
 
+## Data Generation
+
+Synthetic data is generated using **Structural Causal Models (SCMs)**:
+
+- **DAG Structure**: Growing network with redirection (preferential attachment for scale-free networks)
+- **Node Representations**: Vector embeddings in ℝᵈ
+- **Edge Functions**: Neural networks (with various activations), decision trees, or categorical mappings
+- **Activations**: identity, log, sigmoid, abs, sin, tanh, rank, square, power (2-5), smooth ReLU, step, modulo
+- **Post-processing**: Kumaraswamy warping (20% of datasets), quantization, missing values (MCAR with NaN)
+- **Feature Sampling**: Beta(0.95, 8.0) distribution scaled to [1, 160] features
+- **Cell Budget**: Tables capped at 75,000 cells
+
+```bash
+# Generate and save synthetic datasets to HDF5
+python generate_data.py --n_datasets 100000 --output data/synthetic.h5
+
+# Generate with visualization
+python generate_data.py --n_datasets 10 --visualize
+
+# Generate for regression
+python generate_data.py --n_datasets 100000 --regression --output data/synthetic_reg.h5
+```
+
+### Data Generation Configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--n_datasets` | 100000 | Number of datasets to generate |
+| `--output` | data/synthetic.h5 | Output HDF5 file path |
+| `--max_samples` | 512 | Maximum samples per dataset (paper uses up to 2048) |
+| `--max_features` | 160 | Maximum features per dataset (Beta distribution, paper-aligned) |
+| `--max_classes` | 10 | Maximum classes (classification) |
+| `--regression` | False | Generate regression data |
+| `--visualize` | False | Show visualization of generated data |
+| `--seed` | 42 | Random seed |
+
+
 ## Training
 
-Training uses **online data generation** - each batch is a freshly generated synthetic dataset from an SCM prior.
+Training can use offline data generation as described above in the quickstart, or **online data generation** - each batch is a freshly generated synthetic dataset from an SCM prior.
 
 ```bash
 # Basic training (classification)
@@ -120,41 +155,6 @@ python train.py --online --resume checkpoints/model_50000.pt
 | `--output_dir` | checkpoints | Output directory for checkpoints |
 | `--compile` | False | Use torch.compile() for ~10-20% faster training |
 
-## Data Generation
-
-Synthetic data is generated using **Structural Causal Models (SCMs)** following the TabPFN v2 Nature paper:
-
-- **DAG Structure**: Growing network with redirection (preferential attachment for scale-free networks)
-- **Node Representations**: Vector embeddings in ℝᵈ
-- **Edge Functions**: Neural networks (with various activations), decision trees, or categorical mappings
-- **Activations**: identity, log, sigmoid, abs, sin, tanh, rank, square, power (2-5), smooth ReLU, step, modulo
-- **Post-processing**: Kumaraswamy warping (20% of datasets), quantization, missing values (MCAR with NaN)
-- **Feature Sampling**: Beta(0.95, 8.0) distribution scaled to [1, 160] features (paper-aligned)
-- **Cell Budget**: Tables capped at 75,000 cells (samples reduced for high feature counts)
-
-```bash
-# Generate and save synthetic datasets to HDF5
-python generate_data.py --n_datasets 100000 --output data/synthetic.h5
-
-# Generate with visualization
-python generate_data.py --n_datasets 10 --visualize
-
-# Generate for regression
-python generate_data.py --n_datasets 100000 --regression --output data/synthetic_reg.h5
-```
-
-### Data Generation Configuration
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--n_datasets` | 100000 | Number of datasets to generate |
-| `--output` | data/synthetic.h5 | Output HDF5 file path |
-| `--max_samples` | 512 | Maximum samples per dataset (paper uses up to 2048) |
-| `--max_features` | 160 | Maximum features per dataset (Beta distribution, paper-aligned) |
-| `--max_classes` | 10 | Maximum classes (classification) |
-| `--regression` | False | Generate regression data |
-| `--visualize` | False | Show visualization of generated data |
-| `--seed` | 42 | Random seed |
 
 ## Evaluation
 
@@ -214,7 +214,11 @@ The model follows the TabPFN architecture with two-way attention:
    - MLP decoder for classification (softmax over classes)
    - Piecewise constant output for regression (binning approach)
 
-## TabArena Leaderboard
+## Current TabArena Leaderboard -lite (03.01.2025)
+
+Note: OpenTab is still in early development. Performance is expected to improve significantly. The current results demonstrate a working baseline trained with minimal compute resources.
+
+**Training configuration**: 1M synthetic datasets, 512 max samples, 50 max features, 10 classes, ~15,500 steps (1 epoch) on a modest NVIDIA GeForce RTX 3050 4GB laptop GPU.
 
 Results on [TabArena](https://github.com/autogluon/tabarena) benchmark comparing OpenTab against state-of-the-art tabular ML methods:
 
@@ -277,7 +281,6 @@ Results on [TabArena](https://github.com/autogluon/tabarena) benchmark comparing
 | 54 | **OpenTab** | **679** | +133/-257 | 0.024 | 52.16 | 43.75 | 52.806 |
 | 55 | KNN (default) | 613 | +76/-113 | 0 | 53.31 | 52.96 | 44.314 |
 
-**Training configuration**: 1M synthetic datasets, 512 max samples, 50 max features, 10 classes, ~15,500 steps (1 epoch) on a modest NVIDIA GeForce RTX 3050 4GB laptop GPU.
 
 ## References
 

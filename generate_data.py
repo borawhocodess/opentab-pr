@@ -114,7 +114,7 @@ def sample_hyperparameters(
     n_samples = random.randint(*n_samples_range)
     
     # Paper: n_features from Beta(k=0.95, b=8.0) scaled to [1, 160]
-    beta_sample = np.random.beta(0.95, 8.0)  # Sample in [0, 1]
+    beta_sample = np.random.beta(0.95, 3)  # Sample in [0, 1]
     n_features_min, n_features_max = n_features_range
     n_features = int(beta_sample * (n_features_max - n_features_min) + n_features_min)
     n_features = max(n_features_min, min(n_features_max, n_features))
@@ -381,7 +381,7 @@ class CategoricalDiscretization:
     def __init__(self, input_dim: int, output_dim: int, n_categories: int = None):
         if n_categories is None:
             # Sample number of categories from gamma distribution with offset
-            n_categories = int(np.random.gamma(2, 2)) + 2
+            n_categories = int(np.random.gamma(2, 4)) + 2
         self.n_categories = min(n_categories, 10)  # Max 10 classes per paper
         
         # Random prototype vectors for each category
@@ -722,15 +722,36 @@ class SCMDataGenerator:
         all_nodes = list(range(hp.n_nodes))
         
         # For classification: prefer categorical nodes for target
+        # We try to find a categorical node that yields at least 2 classes.
+        # If that fails (or if no categorical nodes exist), we fall back to discretizing a continuous node.
+        found_valid_target = False
+        target_node_idx = -1
+        target_values = None
+
         if not self.is_regression and categorical_nodes:
-            target_node_idx, target_mapping = random.choice(categorical_nodes)
-            target_values = target_mapping.get_categories(
-                np.concatenate([node_values[p] for p in np.where(adj[target_node_idx] > 0)[0]], axis=1)
-                if adj[target_node_idx].sum() > 0 else node_values[target_node_idx]
-            )
-            hp.n_classes = target_mapping.n_categories
-        else:
-            # Select a random node for target
+            # Try up to 5 times to find a categorical node that gives > 1 class
+            # Shuffle to avoid bias
+            random.shuffle(categorical_nodes)
+            for idx, mapping in categorical_nodes:
+                # Calculate input to this node (parents' values)
+                parents = np.where(adj[idx] > 0)[0]
+                if len(parents) > 0:
+                    input_data = np.concatenate([node_values[p] for p in parents], axis=1)
+                else:
+                    input_data = node_values[idx]
+                
+                candidate_values = mapping.get_categories(input_data)
+                
+                if len(np.unique(candidate_values)) > 1:
+                    target_node_idx = idx
+                    target_mapping = mapping
+                    target_values = candidate_values
+                    hp.n_classes = mapping.n_categories
+                    found_valid_target = True
+                    break
+        
+        if not found_valid_target:
+            # Fallback: Select a random node for target
             target_node_idx = random.choice(all_nodes)
             # Use first dimension of node values as continuous target
             target_values = node_values[target_node_idx][:, 0]
@@ -738,6 +759,9 @@ class SCMDataGenerator:
             if not self.is_regression:
                 # Convert continuous to discrete classes
                 hp.n_classes = min(hp.n_classes, 10)
+                # Ensure we have at least 2 classes
+                hp.n_classes = max(2, hp.n_classes)
+                
                 if hp.n_classes == 2:
                     target_values = (target_values > np.median(target_values)).astype(np.int64)
                 else:

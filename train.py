@@ -197,6 +197,7 @@ class HDF5Dataset(Dataset):
         if not HAS_H5PY:
             raise ImportError("h5py required: pip install h5py")
         self.path = path
+        self.h5_file = None
         with h5py.File(path, 'r') as f:
             self.length = f['X'].shape[0]
     
@@ -204,12 +205,14 @@ class HDF5Dataset(Dataset):
         return self.length
     
     def __getitem__(self, idx):
-        with h5py.File(self.path, 'r') as f:
-            X = torch.tensor(f['X'][idx], dtype=torch.float32)
-            y = torch.tensor(f['y'][idx], dtype=torch.long)
-            train_size = int(f['single_eval_pos'][idx])
-            n_features = int(f['num_features'][idx])
-            n_samples = int(f['num_datapoints'][idx])
+        if self.h5_file is None:
+            self.h5_file = h5py.File(self.path, 'r')
+            
+        X = torch.tensor(self.h5_file['X'][idx], dtype=torch.float32)
+        y = torch.tensor(self.h5_file['y'][idx], dtype=torch.long)
+        train_size = int(self.h5_file['single_eval_pos'][idx])
+        n_features = int(self.h5_file['num_features'][idx])
+        n_samples = int(self.h5_file['num_datapoints'][idx])
         
         return {
             'X': X,
@@ -218,6 +221,10 @@ class HDF5Dataset(Dataset):
             'n_features': n_features,
             'n_samples': n_samples,
         }
+
+    def __del__(self):
+        if self.h5_file is not None:
+            self.h5_file.close()
 
 
 def collate_variable_size(batch):

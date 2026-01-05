@@ -56,6 +56,7 @@ from typing import Optional, List, Dict, Any
 import numpy as np
 import pandas as pd
 import torch
+from scipy import stats
 
 # Import our model
 from model import OpenTabModel, OpenTabClassifier, OpenTabRegressor
@@ -83,29 +84,27 @@ class OpenTabWrapper(AbstractExecModel):
     Following the SimpleLightGBM pattern from TabArena:
     - AbstractExecModel handles preprocessing (preprocess_data=True by default)
     - We just implement _fit, _predict, _predict_proba
+    - Uses ensemble of N models with different random subsamples for robustness
     """
     
     # TabPFN-style limits
     MAX_TRAIN_SAMPLES = 512
     MAX_FEATURES = 50
+    N_ENSEMBLE = 1  # Number of models to ensemble (how many times to subsample)
     
     def __init__(self, checkpoint_path: Optional[str] = None, **kwargs):
         super().__init__(**kwargs)
         self.checkpoint_path = checkpoint_path
-        self._model = None
+        self._models = []  # List of models for ensemble
         self._n_classes = None
         self._max_features = None  # Will be set from checkpoint
+        self._X_train = None  # Store training data for ensemble
+        self._y_train = None
     
     def _fit(self, X: pd.DataFrame, y: pd.Series, **kwargs):
-        """Fit the OpenTab model on training data."""
+        """Fit the OpenTab model on training data with ensemble."""
         # Use CPU to avoid OOM on small GPUs
         device = 'cpu'  # torch.cuda.is_available() can use 'cuda' if you have enough GPU memory
-        
-        # Subsample if needed (TabPFN-style)
-        if len(X) > self.MAX_TRAIN_SAMPLES:
-            idx = np.random.RandomState(42).choice(len(X), self.MAX_TRAIN_SAMPLES, replace=False)
-            X = X.iloc[idx]
-            y = y.iloc[idx]
         
         # Convert to numpy
         X_np = X.fillna(0).values.astype(np.float32)
@@ -113,65 +112,111 @@ class OpenTabWrapper(AbstractExecModel):
         
         self._n_classes = len(np.unique(y_np))
         
-        # Load model from checkpoint
+        # Store training data for ensemble fitting
+        self._X_train = X_np
+        self._y_train = y_np
+        
+        # Load model configuration
         if self.checkpoint_path and os.path.exists(self.checkpoint_path):
             checkpoint = torch.load(self.checkpoint_path, map_location=device, weights_only=False)
             config = checkpoint.get('config', {})
-            
-            # Get max_features from config to ensure we truncate properly
             self._max_features = config.get('max_features', 100)
-            
-            model = OpenTabModel(
-                embedding_size=config.get('embedding_size', 128),
-                n_heads=config.get('n_heads', 4),
-                n_layers=config.get('n_layers', 6),
-                mlp_hidden_size=config.get('mlp_hidden_size', 256),
-                n_outputs=config.get('max_classes', 10),
-                max_features=self._max_features,
-                dropout=config.get('dropout', 0.0),
-            )
-            model.load_state_dict(checkpoint['model_state'])
-            self._model = OpenTabClassifier(model=model, device=device)
         else:
+            config = {}
             self._max_features = self.MAX_FEATURES
-            model = OpenTabModel(n_outputs=max(10, self._n_classes), max_features=self._max_features)
-            self._model = OpenTabClassifier(model=model, device=device)
         
-        # Limit features to what model was trained on
-        if X_np.shape[1] > self._max_features:
-            X_np = X_np[:, :self._max_features]
+        # Train N ensemble models with different random subsamples
+        self._models = []
+        for i in range(self.N_ENSEMBLE):
+            # Subsample if needed (TabPFN-style) with different random seed
+            X_subsample = X_np
+            y_subsample = y_np
+            
+            if len(X_np) > self.MAX_TRAIN_SAMPLES:
+                idx = np.random.RandomState(42 + i).choice(
+                    len(X_np), self.MAX_TRAIN_SAMPLES, replace=False
+                )
+                X_subsample = X_np[idx]
+                y_subsample = y_np[idx]
+            
+            # Limit features to what model was trained on
+            if X_subsample.shape[1] > self._max_features:
+                X_subsample = X_subsample[:, :self._max_features]
+            
+            # Create and fit model
+            if self.checkpoint_path and os.path.exists(self.checkpoint_path):
+                model = OpenTabModel(
+                    embedding_size=config.get('embedding_size', 128),
+                    n_heads=config.get('n_heads', 4),
+                    n_layers=config.get('n_layers', 6),
+                    mlp_hidden_size=config.get('mlp_hidden_size', 256),
+                    n_outputs=config.get('max_classes', 10),
+                    max_features=self._max_features,
+                    dropout=config.get('dropout', 0.0),
+                )
+                model.load_state_dict(checkpoint['model_state'])
+                classifier = OpenTabClassifier(model=model, device=device)
+            else:
+                model = OpenTabModel(n_outputs=max(10, self._n_classes), max_features=self._max_features)
+                classifier = OpenTabClassifier(model=model, device=device)
+            
+            classifier.fit(X_subsample, y_subsample)
+            self._models.append(classifier)
         
-        self._model.fit(X_np, y_np)
         return self
     
     def _predict(self, X: pd.DataFrame) -> pd.Series:
-        """Predict class labels."""
+        """Predict class labels by averaging predictions from ensemble."""
         X_np = X.fillna(0).values.astype(np.float32)
         if X_np.shape[1] > self._max_features:
             X_np = X_np[:, :self._max_features]
-        y_pred = self._model.predict(X_np)
-        return pd.Series(y_pred, index=X.index)
+        
+        # Get predictions from all models and use majority voting
+        all_predictions = []
+        for model in self._models:
+            y_pred = model.predict(X_np)
+            all_predictions.append(y_pred)
+        
+        # Stack predictions and take mode (most common prediction)
+        all_predictions = np.array(all_predictions)  # Shape: (N_ENSEMBLE, n_samples)
+        
+        # Use mode for majority voting
+        from scipy import stats
+        print("All predictions", all_predictions)
+        y_pred_final, _ = stats.mode(all_predictions, axis=0, keepdims=False)
+        
+        return pd.Series(y_pred_final, index=X.index)
     
     def _predict_proba(self, X: pd.DataFrame) -> pd.DataFrame:
-        """Predict class probabilities."""
+        """Predict class probabilities by averaging from ensemble."""
         X_np = X.fillna(0).values.astype(np.float32)
         if X_np.shape[1] > self._max_features:
             X_np = X_np[:, :self._max_features]
-        probs = self._model.predict_proba(X_np)
         
-        # Ensure correct number of columns
-        if probs.shape[1] < self._n_classes:
-            padded = np.zeros((probs.shape[0], self._n_classes), dtype=np.float32)
-            padded[:, :probs.shape[1]] = probs
-            probs = padded
-        elif probs.shape[1] > self._n_classes:
-            probs = probs[:, :self._n_classes]
+        # Get probabilities from all models and average them
+        all_probs = []
+        for model in self._models:
+            probs = model.predict_proba(X_np)
+            
+            # Ensure correct number of columns
+            if probs.shape[1] < self._n_classes:
+                padded = np.zeros((probs.shape[0], self._n_classes), dtype=np.float32)
+                padded[:, :probs.shape[1]] = probs
+                probs = padded
+            elif probs.shape[1] > self._n_classes:
+                probs = probs[:, :self._n_classes]
+            
+            all_probs.append(probs)
         
-        return pd.DataFrame(probs, index=X.index)
+        # Average probabilities across ensemble
+        probs_avg = np.mean(all_probs, axis=0)
+        return pd.DataFrame(probs_avg, index=X.index)
     
     def cleanup(self):
         """Release resources."""
-        self._model = None
+        self._models = []
+        self._X_train = None
+        self._y_train = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 

@@ -30,8 +30,11 @@ python train.py --online --regression --steps 100000 --output_dir checkpoints
 # Evaluate on sklearn datasets (quick test)
 python evaluate.py --checkpoint checkpoints/model_100000.pt --mode quick
 
-# Evaluate on TabArena benchmark (51 datasets)
+# Evaluate on TabArena benchmark (all 51 datasets: 38 classification + 13 regression)
 python evaluate.py --checkpoint checkpoints/model_100000.pt --mode lite
+
+# Evaluate on TabArena benchmark (classification only: 38 datasets)
+python evaluate.py --checkpoint checkpoints/model_100000.pt --mode lite --task-type classification
 
 # Generate leaderboard comparing against SOTA methods
 python evaluate.py --mode leaderboard --results eval_results --method OpenTab
@@ -173,11 +176,20 @@ python evaluate.py --checkpoint checkpoints/model.pt --mode quick-regression
 [TabArena](https://github.com/autogluon/tabarena) provides standardized benchmarking against state-of-the-art tabular ML methods.
 
 ```bash
-# TabArena-Lite (51 datasets, 1 fold each)
+# TabArena-Lite (all 51 datasets, 1 fold each)
 python evaluate.py --checkpoint checkpoints/model.pt --mode lite
+
+# TabArena-Lite (classification only: 38 datasets)
+python evaluate.py --checkpoint checkpoints/model.pt --mode lite --task-type classification
+
+# TabArena-Lite (regression only: 13 datasets)
+python evaluate.py --checkpoint checkpoints/model.pt --mode lite --task-type regression
 
 # Full TabArena (all datasets, all folds)
 python evaluate.py --checkpoint checkpoints/model.pt --mode full
+
+# Full TabArena (classification only, all folds)
+python evaluate.py --checkpoint checkpoints/model.pt --mode full --task-type classification
 
 # Generate leaderboard with ELO ratings
 python evaluate.py --mode leaderboard --results eval_results --method OpenTab
@@ -192,10 +204,17 @@ python evaluate.py --mode leaderboard-cache --method OpenTab
 |------|-------------|
 | `quick` | Test on sklearn classification datasets |
 | `quick-regression` | Test on sklearn regression datasets |
-| `lite` | TabArena-Lite (51 datasets, 1 fold) |
-| `full` | Full TabArena (all datasets, all folds) |
+| `lite` | TabArena-Lite (51 datasets, 1 fold). Use `--task-type` to filter |
+| `full` | Full TabArena (all datasets, all folds). Use `--task-type` to filter |
 | `leaderboard` | Generate leaderboard with ELO ratings |
 | `leaderboard-cache` | Load leaderboard from cache |
+
+### Task Type Filtering
+
+Use `--task-type` (or `-t`) to filter tasks in `lite` and `full` modes:
+- `all` (default): Evaluate on all 51 tasks (38 classification + 13 regression)
+- `classification`: Only 38 classification tasks
+- `regression`: Only 13 regression tasks
 
 ## Model Architecture
 
@@ -214,72 +233,74 @@ The model follows the TabPFN architecture with two-way attention:
    - MLP decoder for classification (softmax over classes)
    - Piecewise constant output for regression (binning approach)
 
-## Current TabArena Leaderboard -lite (03.01.2025)
+## Current TabArena Leaderboard - Classification Only (05.01.2026)
 
 Note: OpenTab is still in early development. Performance is expected to improve significantly. The current results demonstrate a working baseline trained with minimal compute resources.
 
 **Training configuration**: 1M synthetic datasets, 512 max samples, 50 max features, 10 classes, ~15,500 steps (1 epoch) on a modest NVIDIA GeForce RTX 3050 4GB laptop GPU.
 
+**Evaluation**: 38 classification tasks from TabArena-v0.1. The model supports both classification and regression, but these results show classification-only performance (use `--task-type classification` to reproduce).
+
 Results on [TabArena](https://github.com/autogluon/tabarena) benchmark comparing OpenTab against state-of-the-art tabular ML methods:
 
 | # | Model | Elo ⬆️ | Elo 95% CI | Score ⬆️ | Rank ⬇️ | Harmonic Rank ⬇️ | Improvability (%) ⬇️ |
 |---:|:---|---:|:---|---:|---:|---:|---:|
-| 0 | RealTabPFN-v2.5 (tuned + ensembled) | 1631 | +100/-69 | 0.689 | 8.22 | 2.63 | 3.759 |
-| 1 | AutoGluon 1.4 (extreme, 4h) | 1611 | +92/-77 | 0.662 | 8.91 | 3.98 | 5.868 |
-| 2 | RealTabPFN-v2.5 (tuned) | 1580 | +87/-67 | 0.615 | 10.08 | 4.34 | 5.875 |
-| 3 | AutoGluon 1.4 (best, 4h) | 1547 | +67/-64 | 0.565 | 11.45 | 4.87 | 7.644 |
-| 4 | RealTabPFN-v2.5 (default) | 1540 | +72/-50 | 0.565 | 11.75 | 6.17 | 6.522 |
-| 5 | RealMLP_GPU (tuned + ensembled) | 1512 | +58/-51 | 0.51 | 13.02 | 7.61 | 8.756 |
-| 6 | TabDPT_GPU (tuned + ensembled) | 1438 | +69/-59 | 0.453 | 16.8 | 5.02 | 9.172 |
-| 7 | RealMLP_GPU (tuned) | 1435 | +57/-56 | 0.416 | 16.95 | 8.43 | 10.281 |
-| 8 | LightGBM (tuned + ensembled) | 1416 | +40/-40 | 0.323 | 18.05 | 13.36 | 11.697 |
-| 9 | TabM_GPU (tuned + ensembled) | 1412 | +70/-45 | 0.373 | 18.24 | 9.1 | 10.747 |
-| 10 | TabDPT_GPU (tuned) | 1395 | +77/-60 | 0.395 | 19.25 | 6.66 | 10.815 |
-| 11 | CatBoost (tuned + ensembled) | 1394 | +59/-46 | 0.331 | 19.3 | 12.45 | 11.285 |
-| 12 | ModernNCA_GPU (tuned + ensembled) | 1386 | +84/-63 | 0.382 | 19.76 | 7.9 | 11.588 |
-| 13 | CatBoost (tuned) | 1368 | +54/-46 | 0.303 | 20.79 | 13.29 | 11.713 |
-| 14 | XGBoost (tuned + ensembled) | 1367 | +46/-49 | 0.279 | 20.87 | 13.52 | 12.324 |
-| 15 | LightGBM (tuned) | 1352 | +50/-48 | 0.262 | 21.78 | 16.33 | 12.602 |
-| 16 | ModernNCA_GPU (tuned) | 1349 | +62/-57 | 0.301 | 21.96 | 11.58 | 12.202 |
-| 17 | CatBoost (default) | 1348 | +44/-44 | 0.267 | 22.04 | 12.16 | 12.296 |
-| 18 | TabM_GPU (tuned) | 1346 | +66/-54 | 0.296 | 22.13 | 13.29 | 11.681 |
-| 19 | XGBoost (tuned) | 1344 | +47/-45 | 0.254 | 22.25 | 12.86 | 12.508 |
-| 20 | xRFM_GPU (tuned + ensembled) | 1342 | +62/-45 | 0.286 | 22.35 | 13.53 | 12.482 |
-| 21 | TabPFNv2_GPU (tuned + ensembled) [35.29% IMPUTED] | 1337 | +76/-73 | 0.345 | 22.7 | 7.4 | 12.653 |
-| 22 | Mitra_GPU (default) [35.29% IMPUTED] | 1313 | +56/-68 | 0.286 | 24.2 | 10.18 | 13.462 |
-| 23 | xRFM_GPU (tuned) | 1292 | +60/-44 | 0.208 | 25.46 | 13.73 | 13.858 |
-| 24 | TabDPT_GPU (default) | 1289 | +70/-71 | 0.285 | 25.66 | 9.24 | 13.508 |
-| 25 | TabICL_GPU (default) [29.41% IMPUTED] | 1284 | +61/-56 | 0.255 | 25.94 | 9.08 | 13.311 |
-| 26 | TabM_GPU (default) | 1283 | +55/-51 | 0.226 | 26.06 | 18.29 | 14.086 |
-| 27 | TabPFNv2_GPU (tuned) [35.29% IMPUTED] | 1270 | +70/-60 | 0.237 | 26.83 | 13.71 | 14.323 |
-| 28 | EBM (tuned + ensembled) | 1269 | +51/-56 | 0.196 | 26.9 | 16.52 | 15.046 |
-| 29 | RealMLP_GPU (default) | 1258 | +44/-51 | 0.147 | 27.63 | 19.25 | 14.457 |
-| 30 | TorchMLP (tuned + ensembled) | 1258 | +46/-53 | 0.151 | 27.63 | 22.19 | 13.83 |
-| 31 | TabPFNv2_GPU (default) [35.29% IMPUTED] | 1234 | +69/-78 | 0.214 | 29.11 | 11.75 | 15.18 |
-| 32 | EBM (tuned) | 1220 | +62/-57 | 0.147 | 29.96 | 15.65 | 15.879 |
-| 33 | ModernNCA_GPU (default) | 1217 | +59/-48 | 0.135 | 30.13 | 16.17 | 16.702 |
-| 34 | ExtraTrees (tuned + ensembled) | 1204 | +56/-59 | 0.117 | 30.92 | 22.7 | 17.12 |
-| 35 | EBM (default) | 1195 | +58/-59 | 0.135 | 31.49 | 17.01 | 16.826 |
-| 36 | TorchMLP (tuned) | 1191 | +46/-60 | 0.116 | 31.73 | 24.87 | 15.694 |
-| 37 | XGBoost (default) | 1186 | +61/-53 | 0.117 | 32.06 | 18.06 | 15.734 |
-| 38 | FastaiMLP (tuned + ensembled) | 1176 | +64/-68 | 0.112 | 32.66 | 23.19 | 17.478 |
-| 39 | ExtraTrees (tuned) | 1169 | +65/-60 | 0.118 | 33.03 | 19.98 | 18.168 |
-| 40 | RandomForest (tuned + ensembled) | 1165 | +60/-65 | 0.087 | 33.31 | 24.79 | 18.052 |
-| 41 | LightGBM (default) | 1153 | +54/-48 | 0.083 | 34.01 | 29.69 | 16.533 |
-| 42 | RandomForest (tuned) | 1121 | +48/-47 | 0.05 | 35.84 | 29.97 | 18.866 |
-| 43 | FastaiMLP (tuned) | 1103 | +58/-76 | 0.073 | 36.84 | 25.56 | 19.105 |
-| 44 | TorchMLP (default) | 1031 | +55/-67 | 0.023 | 40.59 | 36.52 | 20.938 |
-| 45 | xRFM_GPU (default) | 1030 | +71/-72 | 0.057 | 40.63 | 26.85 | 23.722 |
-| 46 | RandomForest (default) | 1000 | +62/-55 | 0.014 | 42.07 | 34.81 | 23.738 |
-| 47 | KNN (tuned + ensembled) | 973 | +63/-82 | 0.024 | 43.27 | 38.46 | 25.579 |
-| 48 | FastaiMLP (default) | 968 | +69/-76 | 0.022 | 43.47 | 39.93 | 23.045 |
-| 49 | ExtraTrees (default) | 968 | +73/-83 | 0.019 | 43.49 | 39.67 | 25.337 |
-| 50 | Linear (tuned + ensembled) | 906 | +78/-108 | 0.024 | 45.98 | 24.13 | 32.211 |
-| 51 | Linear (tuned) | 874 | +76/-108 | 0.017 | 47.09 | 32.38 | 32.797 |
-| 52 | KNN (tuned) | 817 | +67/-89 | 0.012 | 48.9 | 46.88 | 31.715 |
-| 53 | Linear (default) | 814 | +86/-128 | 0.008 | 48.98 | 46.14 | 35.354 |
-| 54 | **OpenTab** | **679** | +133/-257 | 0.024 | 52.16 | 43.75 | 52.806 |
-| 55 | KNN (default) | 613 | +76/-113 | 0 | 53.31 | 52.96 | 44.314 |
+| 0 | RealTabPFN-v2.5 (tuned + ensembled) | 1588 | +99/-86 | 0.646 | 9.26 | 2.8 | 4.624 |
+| 1 | AutoGluon 1.4 (extreme, 4h) | 1581 | +93/-79 | 0.658 | 9.54 | 3.89 | 6.975 |
+| 2 | RealTabPFN-v2.5 (tuned) | 1555 | +93/-79 | 0.592 | 10.55 | 4.91 | 7.143 |
+| 3 | RealTabPFN-v2.5 (default) | 1533 | +84/-72 | 0.568 | 11.51 | 5.92 | 7.507 |
+| 4 | AutoGluon 1.4 (best, 4h) | 1526 | +92/-61 | 0.565 | 11.82 | 4.64 | 8.629 |
+| 5 | RealMLP_GPU (tuned + ensembled) | 1482 | +60/-50 | 0.481 | 13.89 | 7.46 | 10.302 |
+| 6 | RealMLP_GPU (tuned) | 1415 | +54/-52 | 0.403 | 17.49 | 7.85 | 11.952 |
+| 7 | TabM_GPU (tuned + ensembled) | 1403 | +76/-59 | 0.382 | 18.18 | 8.02 | 12.434 |
+| 8 | LightGBM (tuned + ensembled) | 1392 | +55/-41 | 0.306 | 18.86 | 13.37 | 13.178 |
+| 9 | TabDPT_GPU (tuned + ensembled) | 1372 | +96/-61 | 0.353 | 20.05 | 8.17 | 11.441 |
+| 10 | CatBoost (tuned + ensembled) | 1371 | +73/-56 | 0.33 | 20.09 | 12.2 | 12.7 |
+| 11 | TabICL_GPU (default) [5.26% IMPUTED] | 1365 | +80/-73 | 0.342 | 20.45 | 7.16 | 12.606 |
+| 12 | XGBoost (tuned + ensembled) | 1362 | +72/-74 | 0.296 | 20.67 | 12.1 | 13.768 |
+| 13 | ModernNCA_GPU (tuned) | 1348 | +67/-71 | 0.306 | 21.5 | 10.95 | 13.208 |
+| 14 | CatBoost (default) | 1348 | +50/-53 | 0.288 | 21.5 | 10.8 | 13.343 |
+| 15 | CatBoost (tuned) | 1348 | +65/-58 | 0.3 | 21.51 | 14.53 | 13.231 |
+| 16 | TabM_GPU (tuned) | 1342 | +82/-63 | 0.319 | 21.88 | 11.89 | 13.403 |
+| 17 | ModernNCA_GPU (tuned + ensembled) | 1341 | +95/-87 | 0.333 | 21.92 | 9.35 | 13.248 |
+| 18 | TabPFNv2_GPU (tuned + ensembled) [31.58% IMPUTED] | 1333 | +95/-81 | 0.348 | 22.43 | 8.43 | 14.799 |
+| 19 | LightGBM (tuned) | 1332 | +67/-48 | 0.255 | 22.47 | 16.55 | 14.12 |
+| 20 | XGBoost (tuned) | 1331 | +66/-67 | 0.262 | 22.55 | 11.46 | 14.021 |
+| 21 | TabDPT_GPU (tuned) | 1323 | +74/-72 | 0.293 | 23.04 | 8.26 | 13.473 |
+| 22 | Mitra_GPU (default) [31.58% IMPUTED] | 1315 | +86/-83 | 0.303 | 23.53 | 9.68 | 15.138 |
+| 23 | xRFM_GPU (tuned + ensembled) | 1309 | +72/-57 | 0.25 | 23.92 | 13.63 | 14.514 |
+| 24 | EBM (tuned + ensembled) | 1303 | +63/-51 | 0.22 | 24.29 | 15 | 15.58 |
+| 25 | TabM_GPU (default) | 1280 | +76/-64 | 0.246 | 25.76 | 16.92 | 16.062 |
+| 26 | TabPFNv2_GPU (tuned) [31.58% IMPUTED] | 1272 | +76/-79 | 0.242 | 26.3 | 13.03 | 16.524 |
+| 27 | TorchMLP (tuned + ensembled) | 1262 | +50/-48 | 0.172 | 26.95 | 20.99 | 15.317 |
+| 28 | RealMLP_GPU (default) | 1259 | +64/-51 | 0.166 | 27.11 | 17.8 | 15.931 |
+| 29 | xRFM_GPU (tuned) | 1258 | +70/-55 | 0.176 | 27.2 | 13.05 | 16.168 |
+| 30 | EBM (tuned) | 1249 | +67/-54 | 0.154 | 27.74 | 14.63 | 16.507 |
+| 31 | EBM (default) | 1241 | +60/-55 | 0.163 | 28.24 | 14.3 | 17.402 |
+| 32 | TabPFNv2_GPU (default) [31.58% IMPUTED] | 1238 | +81/-80 | 0.22 | 28.49 | 10.51 | 17.278 |
+| 33 | TabDPT_GPU (default) | 1211 | +82/-69 | 0.189 | 30.14 | 11.05 | 16.684 |
+| 34 | FastaiMLP (tuned + ensembled) | 1207 | +68/-91 | 0.149 | 30.41 | 20.45 | 18.549 |
+| 35 | XGBoost (default) | 1192 | +68/-70 | 0.131 | 31.34 | 15.78 | 17.116 |
+| 36 | ExtraTrees (tuned + ensembled) | 1192 | +63/-59 | 0.116 | 31.37 | 22.21 | 18.759 |
+| 37 | TorchMLP (tuned) | 1191 | +69/-62 | 0.13 | 31.42 | 23.76 | 17.609 |
+| 38 | ModernNCA_GPU (default) | 1167 | +65/-61 | 0.095 | 32.91 | 15.43 | 19.205 |
+| 39 | RandomForest (tuned + ensembled) | 1166 | +66/-75 | 0.107 | 32.95 | 22.93 | 19.675 |
+| 40 | ExtraTrees (tuned) | 1151 | +66/-76 | 0.114 | 33.86 | 18.84 | 20.059 |
+| 41 | LightGBM (default) | 1141 | +58/-63 | 0.096 | 34.49 | 29.15 | 18.433 |
+| 42 | FastaiMLP (tuned) | 1124 | +68/-80 | 0.097 | 35.47 | 22.82 | 20.568 |
+| 43 | RandomForest (tuned) | 1122 | +57/-59 | 0.058 | 35.61 | 28.7 | 20.512 |
+| 44 | TorchMLP (default) | 1029 | +60/-74 | 0.029 | 40.68 | 35.98 | 23.249 |
+| 45 | RandomForest (default) | 1000 | +60/-80 | 0.019 | 42.09 | 33 | 26.601 |
+| 46 | KNN (tuned + ensembled) | 996 | +72/-98 | 0.032 | 42.29 | 36.61 | 27.368 |
+| 47 | FastaiMLP (default) | 986 | +72/-67 | 0.029 | 42.76 | 38.51 | 24.469 |
+| 48 | xRFM_GPU (default) | 966 | +89/-88 | 0.043 | 43.63 | 37.51 | 27.398 |
+| 49 | Linear (tuned + ensembled) | 962 | +81/-96 | 0.032 | 43.83 | 20.39 | 30.833 |
+| 50 | Linear (tuned) | 932 | +88/-104 | 0.023 | 45.08 | 28.59 | 31.557 |
+| 51 | ExtraTrees (default) | 920 | +73/-100 | 0.014 | 45.58 | 41.5 | 29.133 |
+| 52 | Linear (default) | 874 | +86/-106 | 0.01 | 47.26 | 44.03 | 34.148 |
+| 53 | KNN (tuned) | 825 | +91/-116 | 0.016 | 48.84 | 46.25 | 34.867 |
+| 54 | **OpenTab** | **818** | **+136/-191** | **0.038** | **49.05** | **41.48** | **42.268** |
+| 55 | KNN (default) | 553 | +104/-150 | 0 | 54.24 | 53.97 | 49.494 |
 
 
 ## References

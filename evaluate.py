@@ -13,11 +13,20 @@ Usage:
     # Quick regression evaluation on sklearn datasets  
     python evaluate.py --checkpoint checkpoints/regressor.pt --mode quick-regression
     
-    # Full TabArena-Lite evaluation (classification only, 51 datasets, 1 fold)
+    # Full TabArena-Lite evaluation (all tasks: 51 datasets, 1 fold)
     python evaluate.py --checkpoint checkpoints/classifier.pt --mode lite
     
-    # Full TabArena evaluation (all datasets, all folds)
+    # TabArena-Lite evaluation (classification only: 38 datasets)
+    python evaluate.py --checkpoint checkpoints/classifier.pt --mode lite --task-type classification
+    
+    # TabArena-Lite evaluation (regression only: 13 datasets)
+    python evaluate.py --checkpoint checkpoints/regressor.pt --mode lite --task-type regression
+    
+    # Full TabArena evaluation (all datasets, all folds, all task types)
     python evaluate.py --checkpoint checkpoints/classifier.pt --mode full
+    
+    # Full TabArena evaluation (classification only)
+    python evaluate.py --checkpoint checkpoints/classifier.pt --mode full --task-type classification
     
     # Generate leaderboard from results directory (official TabArena approach)
     python evaluate.py --mode leaderboard --results eval_results --method OpenTab
@@ -372,11 +381,16 @@ def quick_eval_regression(checkpoint_path: Optional[str], output_dir: str = 'eva
 # TabArena evaluation
 # =============================================================================
 
-def run_tabarena_lite(checkpoint_path: str, output_dir: str = 'tabarena_results'):
+def run_tabarena_lite(checkpoint_path: str, output_dir: str = 'tabarena_results', task_type: str = 'all'):
     """
     Run TabArena-Lite evaluation following the official pattern.
     
     This uses the pattern from examples/benchmarking/custom_tabarena_model/
+    
+    Args:
+        checkpoint_path: Path to model checkpoint
+        output_dir: Directory to save results
+        task_type: Type of tasks to evaluate - 'all', 'classification', or 'regression'
     """
     if not HAS_TABARENA:
         print("Error: TabArena not installed")
@@ -389,7 +403,33 @@ def run_tabarena_lite(checkpoint_path: str, output_dir: str = 'tabarena_results'
     print("=" * 60)
     
     # Get all TabArena-v0.1 tasks
-    task_ids = openml.study.get_suite("tabarena-v0.1").tasks
+    all_task_ids = openml.study.get_suite("tabarena-v0.1").tasks
+    
+    # Filter tasks based on task_type
+    filtered_task_ids = []
+    classification_count = 0
+    regression_count = 0
+    
+    for task_id in all_task_ids:
+        task = openml.tasks.get_task(task_id)
+        is_classification = "Classification" in task.task_type
+        is_regression = "Regression" in task.task_type
+        
+        if is_classification:
+            classification_count += 1
+        if is_regression:
+            regression_count += 1
+        
+        if task_type == 'all':
+            filtered_task_ids.append(task_id)
+        elif task_type == 'classification' and is_classification:
+            filtered_task_ids.append(task_id)
+        elif task_type == 'regression' and is_regression:
+            filtered_task_ids.append(task_id)
+    
+    print(f"Task type filter: {task_type}")
+    print(f"Total tasks: {len(all_task_ids)} ({classification_count} classification, {regression_count} regression)")
+    print(f"Evaluating on: {len(filtered_task_ids)} tasks")
     
     # Create experiment with our wrapper
     experiments = [
@@ -404,7 +444,7 @@ def run_tabarena_lite(checkpoint_path: str, output_dir: str = 'tabarena_results'
     run_experiments_new(
         output_dir=output_dir,
         model_experiments=experiments,
-        tasks=task_ids,
+        tasks=filtered_task_ids,
         repetitions_mode="TabArena-Lite",
     )
     
@@ -412,8 +452,15 @@ def run_tabarena_lite(checkpoint_path: str, output_dir: str = 'tabarena_results'
     return output_dir
 
 
-def run_tabarena_full(checkpoint_path: str, output_dir: str = 'tabarena_results_full'):
-    """Run full TabArena evaluation (multiple folds)."""
+def run_tabarena_full(checkpoint_path: str, output_dir: str = 'tabarena_results_full', task_type: str = 'all'):
+    """
+    Run full TabArena evaluation (multiple folds).
+    
+    Args:
+        checkpoint_path: Path to model checkpoint
+        output_dir: Directory to save results
+        task_type: Type of tasks to evaluate - 'all', 'classification', or 'regression'
+    """
     if not HAS_TABARENA:
         print("Error: TabArena not installed")
         return None
@@ -424,7 +471,33 @@ def run_tabarena_full(checkpoint_path: str, output_dir: str = 'tabarena_results_
     print("TabArena Full Evaluation")
     print("=" * 60)
     
-    task_ids = openml.study.get_suite("tabarena-v0.1").tasks
+    all_task_ids = openml.study.get_suite("tabarena-v0.1").tasks
+    
+    # Filter tasks based on task_type
+    filtered_task_ids = []
+    classification_count = 0
+    regression_count = 0
+    
+    for task_id in all_task_ids:
+        task = openml.tasks.get_task(task_id)
+        is_classification = "Classification" in task.task_type
+        is_regression = "Regression" in task.task_type
+        
+        if is_classification:
+            classification_count += 1
+        if is_regression:
+            regression_count += 1
+        
+        if task_type == 'all':
+            filtered_task_ids.append(task_id)
+        elif task_type == 'classification' and is_classification:
+            filtered_task_ids.append(task_id)
+        elif task_type == 'regression' and is_regression:
+            filtered_task_ids.append(task_id)
+    
+    print(f"Task type filter: {task_type}")
+    print(f"Total tasks: {len(all_task_ids)} ({classification_count} classification, {regression_count} regression)")
+    print(f"Evaluating on: {len(filtered_task_ids)} tasks")
     
     experiments = [
         Experiment(
@@ -437,7 +510,7 @@ def run_tabarena_full(checkpoint_path: str, output_dir: str = 'tabarena_results_
     run_experiments_new(
         output_dir=output_dir,
         model_experiments=experiments,
-        tasks=task_ids,
+        tasks=filtered_task_ids,
         repetitions_mode="TabArena",  # Full mode
     )
     
@@ -622,6 +695,9 @@ def main():
                        help='Path to results directory (for leaderboard mode)')
     parser.add_argument('--method', type=str, default='OpenTab',
                        help='Method name for leaderboard')
+    parser.add_argument('--task-type', '-t', type=str, default='all',
+                       choices=['all', 'classification', 'regression'],
+                       help='Task type filter for lite/full modes (default: all)')
     
     args = parser.parse_args()
     
@@ -630,9 +706,9 @@ def main():
     elif args.mode == 'quick-regression':
         quick_eval_regression(args.checkpoint, args.output)
     elif args.mode == 'lite':
-        run_tabarena_lite(args.checkpoint, args.output)
+        run_tabarena_lite(args.checkpoint, args.output, args.task_type)
     elif args.mode == 'full':
-        run_tabarena_full(args.checkpoint, args.output)
+        run_tabarena_full(args.checkpoint, args.output, args.task_type)
     elif args.mode == 'leaderboard':
         # Use results directory from --results or default to eval_results
         results_dir = args.results if args.results else args.output
